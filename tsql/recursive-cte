@@ -1,0 +1,41 @@
+
+CREATE TABLE #EmployeeTree(
+    userID INT,
+    userName VARCHAR(256),
+    supervisorID INT);
+GO
+
+INSERT INTO #EmployeeTree(userID, userName, supervisorID)
+VALUES
+(1, 'CEO', NULL),
+(2, 'President', 1),
+(3, 'CIO', 2),
+(4, 'Director', 3),
+(5, 'Manager', 4),
+(6, 'IC', 5),
+(7, 'IC', 5),
+(8, 'IC', 5),
+(9, 'IC', 5)
+GO
+
+WITH cteRecursiveTree (userID, userName, SupervisorID, Lvl) 
+AS  (
+    SELECT  ceo.userID,  
+            ceo.userName,  
+            ceo.supervisorID,
+            Lvl = 0 
+    FROM    #EmployeeTree AS ceo 
+    WHERE    ceo.supervisorID IS NULL 
+    UNION ALL   
+    SELECT  emp.userID,  
+            emp.userName,
+            emp.supervisorID,
+            Lvl + 1
+    FROM    #EmployeeTree AS emp
+    JOIN    cteRecursiveTree
+        ON    cteRecursiveTree.userID = emp.SupervisorID
+    ) 
+SELECT    [OrgTree] = SPACE(cte.lvl * 4) + '+ ' + cte.userName
+FROM    cteRecursiveTree AS cte
+ORDER BY cte.supervisorID ASC, 
+        cte.userName ASC;
