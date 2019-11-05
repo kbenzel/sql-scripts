@@ -1,0 +1,187 @@
+SELECT	TOP 20
+		[Statement Running] = CASE er.[statement_end_offset] WHEN -1 THEN SUBSTRING(est.TEXT, (er.[statement_start_offset]/2) + 1, 2147483647) ELSE SUBSTRING(est.TEXT,(er.[statement_start_offset]/2) + 1, (er.[statement_end_offset] - er.[statement_start_offset])/2) END,
+		[SQL Statement]		= RTRIM(LTRIM(est.text)), -- Last T-SQL Text
+		[SPID]				= es.Session_ID,
+		[BlkBy]				= tl.BlkBy,
+		[CPU]				= ISNULL(er.cpu_time, es.cpu_time),
+		[Disk I/O]			= ISNULL((er.reads + er.writes),(es.reads + es.writes)),
+		[%Complete]			= CONVERT(NUMERIC(6,2), er.percent_complete),
+		[Elapsed Min]		= CONVERT(NUMERIC(10,2), er.total_elapsed_time / 1000.0 / 60.0),
+		[ETA]				= CONVERT(VARCHAR(20),DATEADD(ms, er.estimated_completion_time, GetDate()),20),
+		[ETA Min]			= CONVERT(NUMERIC(10,2), er.estimated_completion_time / 1000.0 / 60.0),
+		[ETA Hours]			= CONVERT(NUMERIC(10,2), er.estimated_completion_time / 1000.0 / 60.0 / 60.0),
+		[Wait Type]			= er.wait_type,
+		[Wait Resource]		= er.wait_resource,
+		[Status]			= UPPER(ISNULL(er.status,es.status)), 
+		[Hostname]			= es.host_name,
+		[Database]			= DB_NAME(er.Database_ID),
+		[Program Name]		= es.program_name,
+		[Login]				= es.login_name,
+		[Login Time]		= sp.login_time,
+		[Last Batch]		= es.last_request_start_time,
+		[Client IP]			= dmec.client_net_address,
+		[Client Port]		= dmec.client_tcp_port,		
+		[Last Wait Type]	= sp.lastwaittype,
+		[Command]			= er.command,
+		[Protocol]			= dmec.protocol_type, 
+		[Auth]				= dmec.auth_scheme,
+		[Query Plan]		= qp.query_plan,
+		[Tran Open?]		= sp.open_tran,
+		[Tran SessionID]	= DTST.[session_id],
+		[Tran Begin]		= DTDT.[database_transaction_begin_time],
+		[Tran Log Records]	= DTDT.[database_transaction_log_record_count],
+		[Tran Log Bytes]	= DTDT.[database_transaction_log_bytes_used],
+		[Tran Log Reserved]	= DTDT.[database_transaction_log_bytes_reserved]
+FROM sys.dm_exec_sessions AS ES		
+	LEFT OUTER JOIN sys.dm_tran_session_transactions AS DTST ON ES.session_id = DTST.session_id
+	LEFT OUTER JOIN sys.dm_tran_database_transactions AS DTDT ON DTDT.transaction_id = DTST.transaction_id
+	LEFT OUTER JOIN sys.dm_exec_requests AS ER ON es.session_id = er.session_id
+	LEFT OUTER JOIN
+			(	SELECT	SPID = A.request_session_id, BlkBy = B.blocking_session_id
+				FROM sys.dm_tran_locks AS A
+					INNER JOIN sys.dm_os_waiting_tasks AS B ON A.lock_owner_address = B.resource_address) AS TL ON es.Session_ID = tl.SPID
+		LEFT OUTER JOIN sys.sysprocesses AS sp ON sp.spid = es.session_id
+		LEFT OUTER JOIN sys.dm_exec_connections AS dmec ON dmec.session_id = es.session_id
+		OUTER APPLY sys.dm_exec_sql_text(sp.sql_handle) AS est
+		OUTER APPLY sys.dm_exec_query_plan(er.plan_handle) AS qp
+WHERE ES.Session_ID <> @@SPID
+	AND ES.host_name IS NOT NULL
+ORDER BY ER.command DESC, last_batch DESC, ES.nt_user_name DESC;
+
+WITH TopWaits AS (
+	SELECT	wait_type,
+			wait_time_ms / 1000. AS wait_time_s,
+			100*wait_time_ms / SUM(wait_time_ms) OVER() AS pct,
+			ROW_NUMBER() OVER(ORDER BY wait_time_ms DESC) AS rn,
+			100*signal_wait_time_ms / wait_time_ms as signal_pct
+  FROM sys.dm_os_wait_stats
+  WHERE wait_time_ms > 0
+    AND wait_type NOT LIKE '%SLEEP%'
+    AND wait_type NOT LIKE '%IDLE%'
+    AND wait_type NOT LIKE '%QUEUE%'   
+    AND wait_type NOT LIKE '%MIRROR%'   
+    AND wait_type NOT LIKE '%BROKER%'  
+    AND wait_type NOT IN('CLR_AUTO_EVENT','REQUEST_FOR_DEADLOCK_SEARCH','SQLTRACE_BUFFER_FLUSH'))
+
+SELECT	W1.wait_type,
+		CAST(W1.wait_time_s AS NUMERIC(12, 2)) AS wait_time_s,
+		CAST(W1.pct AS NUMERIC(5, 2)) AS pct,
+		CAST(SUM(W2.pct) AS NUMERIC(5, 2)) AS running_pct,
+		CAST(W1.signal_pct AS NUMERIC(5, 2)) AS signal_pct
+FROM TopWaits AS W1
+  INNER JOIN TopWaits AS W2 ON W2.rn <= W1.rn
+GROUP BY W1.rn, W1.wait_type, W1.wait_time_s, W1.pct, W1.signal_pct
+HAVING SUM(W2.pct) - W1.pct < 80 -- percentage threshold
+    OR W1.rn <= 5
+ORDER BY W1.rn;
+
+-- http://www.sqlservercentral.com/articles/Performance+Tuning/71784/
+
+-- User connections
+SELECT [User Connections] = cntr_value
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:General Statistics' AND counter_name = 'User Connections'
+ORDER BY cntr_value DESC
+
+-- CPU Utilization
+SELECT TOP 1 [CPU Utilization Percentage] = (ROUND(CAST(A.cntr_value1 AS NUMERIC) / CAST(B.cntr_value2 AS NUMERIC),3))*100
+FROM (SELECT cntr_value AS cntr_value1 FROM sys.dm_os_performance_counters WHERE object_name = 'SQLServer:Resource Pool Stats' AND counter_name = 'CPU usage %') AS A,
+	 (SELECT cntr_value AS cntr_value2 FROM sys.dm_os_performance_counters WHERE object_name = 'SQLServer:Resource Pool Stats' AND counter_name = 'CPU usage % base') AS B
+ORDER BY (ROUND(CAST(A.cntr_value1 AS NUMERIC) / CAST(B.cntr_value2 AS NUMERIC),3))*100 DESC	 
+	 
+-- Transactions per second
+SELECT TOP 5 [Transactions per second]=cntr_value, [Database]=instance_name 
+FROM sys.dm_os_performance_counters 
+WHERE object_name = 'SQLServer:Databases' 
+	AND counter_name = 'Transactions/sec' 
+ORDER BY cntr_value DESC;
+
+-- CPU History
+SET QUOTED_IDENTIFIER OFF;
+
+DECLARE @ts_now BIGINT, 
+		@SQL NVARCHAR(MAX) = 'SELECT @ts_now = cpu_ticks / (CONVERT(FLOAT, cpu_ticks) / CONVERT(FLOAT, ms_ticks)) FROM sys.dm_os_sys_info',
+		@SQLProcessUtilization TINYINT, 
+		@systemIdle TINYINT, 
+		@otherProcessUtiliztion TINYINT, 
+		@time DATETIME;
+
+IF OBJECT_ID('tempdb.dbo.#Tmp','U') IS NOT NULL 
+	DROP TABLE #Tmp
+
+EXEC sys.sp_executesql @statement = @SQL, @params = N'@ts_now BIGINT OUTPUT', @ts_now = @ts_now OUTPUT
+
+SELECT	[timestamp] = CONVERT(BIGINT, [timestamp]), 
+		record = CONVERT(XML, record)
+INTO #Tmp 
+FROM sys.dm_os_ring_buffers 
+WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR' 
+	AND record LIKE '%<SystemHealth>%';
+
+SELECT	TOP 5 
+		[@time] = (DATEADD(ms, -1*(@ts_now - [y].[timestamp]), 
+		GETDATE())),
+		[@SQLProcessUtilization] = y.[SQLProcessUtilization],
+		[@systemIdle] = y.[SystemIdle],
+		[@otherProcessUtiliztion] = (100-y.[SystemIdle]-y.[SQLProcessUtilization])-- AS OtherProcessUtilization
+FROM (
+		SELECT	t.record.value('(./Record/@id)[1]','INT') AS record_id,
+				T2.R.value('./SystemIdle[1]','INT') AS SystemIdle,
+				T2.R.value('./ProcessUtilization[1]','INT') AS SQLProcessUtilization,
+				t.[timestamp]
+		FROM #Tmp AS t
+			CROSS APPLY record.nodes('/Record/SchedulerMonitorEvent/SystemHealth') AS T2 (R)) AS y
+ORDER BY (DATEADD(ms,-1*(@ts_now - [y].[timestamp]), GETDATE())) DESC;  
+SET QUOTED_IDENTIFIER ON;
+
+
+-- Running Jobs
+IF OBJECT_ID('tempdb.dbo.#xp_results','U') IS NOT NULL DROP TABLE #xp_results;
+CREATE TABLE #xp_results(
+      running_job_id        UNIQUEIDENTIFIER NOT NULL,
+      last_run_date         INT              NOT NULL,
+      last_run_time         INT              NOT NULL,
+      next_run_date         INT              NOT NULL,
+      next_run_time         INT              NOT NULL,
+      next_run_schedule_id  INT              NOT NULL,
+      requested_to_run      INT              NOT NULL, -- BOOL
+      request_source        INT              NOT NULL,
+      request_source_id     sysname          COLLATE database_default NULL,
+      running               INT              NOT NULL, -- BOOL
+      current_step          INT              NOT NULL,
+      current_retry_attempt INT              NOT NULL,
+      job_state             INT              NOT NULL);   
+
+INSERT INTO #xp_results 
+	EXEC master.dbo.xp_sqlagent_enum_jobs 1, ''
+INSERT INTO #xp_results 
+	EXEC master.dbo.xp_sqlagent_enum_jobs 0, ''
+
+SELECT	Job = j.name,
+		[Status] = CASE WHEN job_state = 0 THEN 'Not idle or suspended'
+						WHEN job_state = 1 THEN 'Executing'
+						WHEN job_state = 2 THEN 'Waiting For Thread'
+						WHEN job_state = 3 THEN 'Between Retries'
+						WHEN job_state = 4 THEN 'Idle'
+						WHEN job_state = 5 THEN 'Suspended'
+						WHEN job_state = 6 THEN 'WaitingForStepToFinish'
+						WHEN job_state = 7 THEN 'PerformingCompletionActions'
+					ELSE 'Unknown' END,
+		JobID = xp.running_job_id,
+		LastRun = LEFT(CONVERT(VARCHAR,xp.last_run_date),4) + '/' + LEFT(RIGHT(CONVERT(VARCHAR,xp.last_run_date),(LEN(xp.last_run_date)-4)),2) + '/' + RIGHT(CONVERT(VARCHAR,xp.last_run_date),2) + 
+				  SPACE(1) + LEFT(CONVERT(VARCHAR,xp.last_run_time),2) + ':' + LEFT(RIGHT(CONVERT(VARCHAR,xp.last_run_time),4),2),
+		NextRun = CASE WHEN LEN(xp.next_run_date) < 8 AND  LEN(xp.next_run_time) < 8 THEN '0000/00/00 00:00'
+						ELSE
+							LEFT(CONVERT(VARCHAR,xp.next_run_date),4) + '/' + LEFT(RIGHT(CONVERT(VARCHAR,xp.next_run_date),(LEN(xp.next_run_date)-4)),2) + '/' + RIGHT(CONVERT(VARCHAR,xp.next_run_date),2) + 
+							SPACE(1) + LEFT(CONVERT(VARCHAR,xp.next_run_time),2) + ':' + LEFT(RIGHT(CONVERT(VARCHAR,xp.next_run_time),4),2)
+					END,
+		xp.current_step,
+		xp.current_retry_attempt
+FROM msdb.dbo.sysjobs AS J 
+	INNER JOIN #xp_results AS XP ON XP.running_job_id = J.job_id
+WHERE xp.running = 1
+	 
+	 
+-- DBCC SQLPERF(logspace) -- db tran log sizes
+-- DBCC OPENTRAN -- check for open transaction
+	 

@@ -1,0 +1,22 @@
+-- Identify Duplicates
+SELECT *
+FROM (
+		SELECT	Column1, Column2, Column3, RN = ROW_NUMBER() OVER(PARTITION BY Column1, Column2, Column3 ORDER BY Column4)
+		FROM dbo.TableName
+) AS X
+WHERE RN > 1;
+
+-- Delete Duplicates
+BEGIN TRAN;
+
+DELETE X
+FROM (
+		SELECT	Column1, Column2, Column3, RN = ROW_NUMBER() OVER(PARTITION BY Column1, Column2, Column3 ORDER BY Column4)
+		FROM dbo.TableName
+) AS X
+WHERE RN > 1;
+
+-- COMMIT TRAN
+-- ROLLBACK TRAN
+
+-- SELECT @@TRANCOUNT

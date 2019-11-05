@@ -1,0 +1,116 @@
+/*
+SELECT [cntr_value]
+FROM sys.dm_os_performance_counters
+WHERE
+	[object_name] LIKE '%Buffer Manager%'
+	AND [counter_name] = 'Page life expectancy'
+
+SELECT [cntr_value]
+FROM sys.dm_os_performance_counters
+WHERE
+	[object_name] LIKE '%Buffer Manager%'
+	AND [counter_name] = 'Buffer cache hit ratio'
+
+	SELECT [counter_name], [cntr_value]
+FROM sys.dm_os_performance_counters
+WHERE
+	[object_name] LIKE '%Buffer Manager%'
+AND [counter_name] IN ('Page reads/sec', 'Page writes/sec', 'Lazy writes/sec')
+
+--> To query the value of the Memory Grants Pending counter run the following:
+SELECT [cntr_value]
+FROM sys.dm_os_performance_counters
+WHERE
+	[object_name] LIKE '%Memory Manager%'
+	AND [counter_name] = 'Memory Grants Pending'
+
+--> To find out which queries are currently waiting on a memory grant, run the following query:
+SELECT *
+FROM sys.dm_exec_query_memory_grants
+WHERE
+	grant_time IS NULL
+
+*/
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = '20 (0 is ideal)',
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'Number of times per second that the Lazy Writer process moves dirty pages from the buffer to disk. A lower number is better than a higher number. Zero is ideal. If this number is greater than 20, more memory is needed.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Buffer Manager' AND counter_name = 'Lazy writes/sec'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = '> 300',
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'Average number of seconds SQL Server expects a data page to remain in cache. If this is less than 300, it could indicate poor index design or a shortage of memory.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Buffer Manager' AND counter_name = 'Page Life Expectancy'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = '80-90 (lower is better)',
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'Number of physical database page reads that are issued per second. If the value is higher than 90, it could indicate poor index design or a shortage of memory.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Buffer Manager' AND counter_name = 'Page reads/sec'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = '80-90 (lower is better)',
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'Number of database pages physically written to disk per second. If the values are higher, check “lazy writes / sec” and “checkpoint” counters. If all three values are high, this could indicate insufficient memory.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Buffer Manager' AND counter_name = 'Page writes/sec'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = 'See Desc.',
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'Monitors the number of dirty pages per second, which are flushed to disk when SQL Server invokes the checkpoint process. High values for this counter may indicate insufficient memory or that the recovery interval (set using sp_configure) is too high.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Buffer Manager' AND counter_name = 'Checkpoint pages/sec'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = '2',
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'This monitors the number of requests per second where data requests stall because there are no buffers available. Any value greater than two indicates that SQL Server needs more memory.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Buffer Manager' AND counter_name = 'Free list stalls/sec'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = '0',
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'This is the number of processes per second that are waiting for a workspace memory grant. Any value higher than zero indicates a lack of memory.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Memory Manager' AND counter_name = 'Memory Grants Pending'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = (SELECT CONVERT(varchar, CAST(total_physical_memory_kb AS money), 1) FROM sys.dm_os_sys_memory),
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'This is the maximum physical memory SQL Server can consume on the box. This should be close to the physical size of memory.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Memory Manager' AND counter_name = 'Target Server Memory (KB)'
+
+UNION ALL
+
+SELECT	[Metric] = RTRIM(object_name) + ' - ' + RTRIM(LTRIM(counter_name)),
+		[Desired Value] = (SELECT CONVERT(varchar, CAST(total_physical_memory_kb AS money), 1) FROM sys.dm_os_sys_memory),
+		[Actual Value] = CONVERT(varchar, CAST(cntr_value AS money), 1),
+		[Desc] = 'This is the amount of physical memory that is currently assigned to SQL Server.. This should be close to the physical size of memory.'
+FROM sys.dm_os_performance_counters
+WHERE object_name = 'SQLServer:Memory Manager' AND counter_name = 'Total Server Memory (KB)'
+
+
+--select *
+--from sys.dm_exec_query_memory_grants

@@ -1,0 +1,146 @@
+
+WITH sys_index_usage_stats AS (
+		SELECT	o.[object_id],
+				i.index_id,
+				Index_Name			= i.[name],
+				user_seeks			= u.user_seeks,
+				last_user_seek		= u.last_user_seek,
+				last_system_seek	= u.last_system_seek,
+				user_scans			= u.user_scans,
+				last_user_scan		= u.last_user_scan,
+				last_system_scan	= u.last_system_scan,
+				user_lookups		= u.user_lookups,
+				last_user_lookup	= u.last_user_lookup,
+				last_system_lookup	= u.last_system_lookup,
+				user_updates		= u.user_updates
+		FROM sys.indexes							AS I
+			INNER JOIN sys.objects					AS O ON I.[object_id] = O.[object_id]
+			INNER JOIN sys.dm_db_index_usage_stats	AS U ON I.[object_id] = U.[object_id] -- Statistics are zeroed during online rebuilds in 2012
+				AND I.index_id = U.index_id
+		WHERE U.database_id = DB_ID()
+			AND O.[type] IN ('U','V')),
+		
+	sys_index_physical_stats AS (
+		SELECT	[object_id],
+				index_id,
+				pages					= SUM(page_count),
+				[page_density]			= SUM(ROUND(avg_page_space_used_in_percent, 2)),
+				page_fragmentation		= CASE WHEN MAX(index_type_desc) <> 'HEAP' THEN SUM(ROUND(avg_fragmentation_in_percent, 2)) ELSE NULL END,
+				extent_fragmentation	= CASE WHEN MAX(index_type_desc) = 'HEAP' THEN SUM(ROUND(avg_fragmentation_in_percent, 2)) ELSE NULL END,
+				[rows]					= SUM(record_count),
+				fw_records				= SUM(forwarded_record_count),
+				partition_number,
+				alloc_unit_type_desc,
+				index_depth,
+				compressed_page_count
+		FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL , NULL, 'SAMPLED')
+		--WHERE alloc_unit_type_desc = 'IN_ROW_DATA'
+		GROUP BY [object_id], index_id, partition_number, alloc_unit_type_desc,
+				index_depth,
+				compressed_page_count)
+		
+	SELECT	'ALTER INDEX ' + QUOTENAME(IX.name) + ' ON ' + QUOTENAME(SI.[schema]) + '.' + QUOTENAME(SI.[table_name]) + ' REBUILD WITH (ONLINE=ON)',
+			[Schema]				= SI.[schema],
+			[Table]					= SI.[table_name],
+			[IX]					= ISNULL(IX.name, ''),
+			[IX Type]				= SI.[Type],
+			[Key Columns]			= ISNULL(REPLACE(REPLACE(REPLACE((
+										SELECT columnName = c.name + CASE WHEN sic.is_descending_key = 0 THEN ' ASC' ELSE ' DESC' END
+										FROM [sys].[index_columns] AS sic
+											INNER JOIN [sys].[columns] AS c ON c.column_id = sic.column_id AND c.[object_id] = sic.[object_id]
+										WHERE sic.[object_id] = ix.[object_id]
+											AND sic.index_id = ix.index_id
+											AND is_included_column = 0
+										ORDER BY sic.index_column_id
+										FOR XML RAW), '"/><row columnName="', ', '), '<row columnName="', ''), '"/>', ''), ''),
+			
+			[Pages]					= FR.pages,
+			[Page Density]			= FR.[page_density],
+			[Page Fragmentation]	= FR.page_fragmentation,			
+			[Rows]					= (SELECT SUM(P.[rows]) FROM [sys].[partitions] AS P WHERE P.index_id = IX.index_id AND IX.[object_id] = P.[object_id]),
+			[IX Size (KB)]			= SU.[Size (KB)],						
+			[Last Stats Update]		= CONVERT(CHAR(10), STATS_DATE(IX.[object_id], IX.index_id), 101),			
+			[Forwarded Records]		= FR.fw_records,
+			[IX Page Splits]		= DOS.leaf_allocation_count,
+			FR.alloc_unit_type_desc,
+			FR.index_depth,
+			FR.compressed_page_count
+		FROM [sys].[indexes] AS IX
+			INNER JOIN [sys].[objects]						AS O ON IX.[object_id] = O.[object_id]
+			LEFT OUTER JOIN (		
+			
+									SELECT	O.[object_id],
+											I.index_id,
+											I.is_disabled,
+											I.fill_factor, -- fullness at page level
+											I.is_padded, -- affects upper levels of b-tree
+											[Type] = CAST(CASE	WHEN I.index_id = 1				THEN 'clustered'
+																WHEN I.index_id = 0				THEN 'heap' ELSE 'nonclustered' END + 
+														 CASE	WHEN I.[ignore_dup_key] <> 0		THEN ', ignore duplicate keys' ELSE '' END +
+														 CASE	WHEN I.is_unique <> 0				THEN ', unique' ELSE '' END +
+														 CASE	WHEN I.is_primary_key <> 0		THEN ', primary key' ELSE '' END +
+														 CASE	WHEN I.has_filter = 1				THEN ', filtered' ELSE '' END +
+														 CASE	WHEN I.[type] = 6				THEN ', columnstore' ELSE '' END +
+														 CASE	WHEN FI.[object_id] IS NOT NULL	THEN ', fulltext' ELSE '' END AS VARCHAR(210)),
+											[table_name] = O.[Name],
+											[schema] = SC.[Name],
+											[table_created]	= O.create_date,
+											[table_modified] = O.modify_date,
+											[table_has_quotedident_on] = OBJECTPROPERTY(O.object_id, 'IsQuotedIdentOn')
+									FROM sys.indexes AS I
+										INNER JOIN sys.objects AS O ON O.[object_id] = I.[object_id]
+										INNER JOIN sys.schemas AS SC ON O.[schema_id] = SC.[schema_id]
+										LEFT OUTER JOIN sys.fulltext_indexes AS FI ON I.[object_id] = FI.[object_id] 
+											AND I.index_id = FI.unique_index_id
+									WHERE O.[type] IN ('U','V')
+
+						)									AS SI ON O.[object_id] = SI.[object_id] AND IX.index_id = SI.index_id
+			LEFT OUTER JOIN (
+				
+									SELECT	[object_id],
+											index_id,
+											leaf_allocation_count, -- this equates to page splits, and it counts both good and bad
+											range_scan_count,
+											singleton_lookup_count,
+											forwarded_fetch_count,
+											lob_fetch_in_pages,
+											lob_fetch_in_bytes,
+											row_lock_count,
+											row_lock_wait_count,
+											row_lock_wait_in_ms,
+											page_lock_count,
+											page_lock_wait_count,
+											page_lock_wait_in_ms,
+											page_latch_wait_count,
+											page_io_latch_wait_count
+									FROM [sys].[dm_db_index_operational_stats](DB_ID(), NULL, NULL, NULL))		AS DOS ON DOS.index_id = IX.index_id AND DOS.[object_id] = IX.[object_id]
+										LEFT OUTER JOIN sys_index_usage_stats			AS DUS ON IX.name = DUS.index_name AND DUS.[object_id] = O.[object_id]
+										LEFT OUTER JOIN sys_index_physical_stats		AS FR ON FR.[object_id] = IX.[object_id] AND fr.index_id = ix.index_id
+										LEFT OUTER JOIN (SELECT	[object_id]			= I.[object_id],
+											[index_ID]			= I.index_id,
+											[Size (KB)]			= SUM(S.used_page_count) * 8			
+									FROM sys.dm_db_partition_stats AS S
+										INNER JOIN sys.indexes AS I ON S.[object_id] = I.[object_id] AND S.index_id = I.index_id
+										INNER JOIN sys.objects AS O ON O.[object_id] = I.[object_id]
+										INNER JOIN sys.schemas AS SC ON O.SCHEMA_ID = SC.SCHEMA_ID
+									WHERE O.[type] IN ('U','V')		
+									GROUP BY I.[object_id], I.index_id, I.name, S.used_page_count, O.create_date, O.modify_date, SC.name
+		
+							)								AS SU ON FR.[object_id] = SU.[object_id] AND SU.index_id = FR.index_id
+			LEFT OUTER JOIN (
+			
+									SELECT	partition_scheme_name	= SPS.name,
+											partition_function_name = SPF.name,
+											data_space_id			= SPS.data_space_id
+									FROM sys.partition_schemes AS SPS
+										INNER JOIN sys.partition_functions AS SPF ON SPS.function_id = SPF.function_id
+			
+							)								AS PT ON IX.data_space_id = PT.data_space_id
+
+		WHERE O.is_ms_shipped = 0
+			AND O.[type] IN ('U','V')
+			AND IX.name IS NOT NULL
+		GROUP BY SI.[schema], SI.table_name, SI.table_created, SI.table_modified, SI.table_has_quotedident_on, IX.[name], SI.[Type], IX.[object_id], IX.[index_id], IX.filter_definition,
+		DUS.user_seeks, DUS.user_scans, DUS.user_lookups, DUS.user_updates, DUS.last_user_seek, DUS.last_user_scan, DUS.last_user_lookup, FR.pages, FR.[page_density], FR.page_fragmentation,
+		SU.[Size (KB)], SI.[index_id], SI.[is_disabled], SI.fill_factor, SI.is_padded, FR.fw_records, DOS.leaf_allocation_count, FR.alloc_unit_type_desc, FR.index_depth, FR.compressed_page_count
+		ORDER BY FR.pages DESC, FR.page_fragmentation DESC

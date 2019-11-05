@@ -1,0 +1,19 @@
+-- Find all servers on your network (Uses xp_cmdshell)
+-- http://www.mssqltips.com/sqlservertip/1113/find-sql-servers-on-your-network-with-osql-and-sqlcmd/
+
+IF OBJECT_ID('tempdb.dbo.#Output','U') IS NOT NULL DROP TABLE #Output
+CREATE TABLE #Output(ServerName VARCHAR(500))
+ 
+INSERT INTO #Output
+EXEC master.dbo.xp_cmdshell 'sqlcmd /L'
+ 
+DELETE #Output
+WHERE LEN(ServerName) < 2
+    OR ServerName IS NULL
+    OR ServerName = 'Servers:'
+                    
+UPDATE #Output
+SET ServerName = RTRIM(LTRIM(ServerName));
+ 
+SELECT ServerName
+FROM #Output;

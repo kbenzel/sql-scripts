@@ -1,0 +1,16 @@
+
+SELECT 'DROP ' + ROUTINE_TYPE + SPACE(1) + QUOTENAME(ROUTINE_SCHEMA) + '.' + QUOTENAME(ROUTINE_NAME), [Level] = 1 FROM INFORMATION_SCHEMA.ROUTINES
+UNION
+SELECT 'ALTER TABLE ' + QUOTENAME(schema_name(schema_id)) + '.' + QUOTENAME(OBJECT_NAME(parent_object_id)) + ' DROP CONSTRAINT ' + name, 2 FROM [sys].[foreign_keys]
+UNION
+SELECT 'DROP '  + CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 'TABLE' ELSE TABLE_TYPE END + SPACE(1) + QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME), 3 FROM INFORMATION_SCHEMA.TABLES
+UNION
+SELECT 'DROP USER ' + QUOTENAME([name]), 4 FROM  sys.database_principals WHERE owning_principal_id IS NULL AND [name] NOT IN ('dbo','guest','INFORMATION_SCHEMA','sys')
+UNION
+SELECT 'DROP SCHEMA ' + QUOTENAME(SCHEMA_NAME), 5
+FROM INFORMATION_SCHEMA.SCHEMATA
+WHERE SCHEMA_NAME NOT IN ('dbo','guest','INFORMATION_SCHEMA','sys','db_owner','db_accessadmin','db_securityadmin','db_ddladmin','db_backupoperator','db_datareader','db_datawriter','db_denydatareader','db_denydatawriter')
+ORDER BY [Level] ASC
+
+-- select * from sys.assemblies
+-- select * from sys.synonyms

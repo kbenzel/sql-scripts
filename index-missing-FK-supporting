@@ -1,0 +1,54 @@
+-- If [Supporting Index] is NULL, you have a Foreign Key without a supporting index.
+-- Why is this bad? Deletes on referenced table = Table Scan on source table
+
+WITH AllIndexes AS (
+        SELECT  [TABLE_SCHEMA]      = LOWER(S.[name]),
+                [TABLE_NAME]        = LOWER(T.[name]),
+                [INDEX]             = I.[name],
+                [IX_Type]           = I.type_desc,
+                [Indexed Columns] = ISNULL(REPLACE(REPLACE(REPLACE((
+                                        SELECT columnName = c.name
+                                                      FROM [sys].[index_columns] AS sic
+                                                             INNER JOIN [sys].[columns] AS c ON c.column_id = sic.column_id AND c.[object_id] = sic.[object_id]
+                                                      WHERE sic.[object_id] = I.[object_id]
+                                                             AND sic.index_id = I.index_id
+                                                             AND is_included_column = 0
+                                        ORDER BY sic.index_column_id
+                                                      FOR XML Raw), '"/><row columnName="', ', '), '<row columnName="', ''), '"/>', ''), '')
+        FROM [sys].[tables] AS T
+            INNER JOIN [sys].[schemas] AS S ON T.[schema_id] = S.[schema_id]
+            INNER JOIN [sys].[indexes] AS I ON T.[object_id] = I.[object_id]
+        WHERE T.is_ms_shipped = 0),
+       
+    PrimaryKeys AS (       
+        SELECT  [TABLE_SCHEMA]      = C.TABLE_SCHEMA,
+                [TABLE_NAME]        = C.TABLE_NAME,
+                [INDEX]             = C.CONSTRAINT_NAME,
+                [IX_Type]           = 'PRIMARY KEY',
+                [Indexed Column]    = CU.COLUMN_NAME
+        FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS C
+            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS CU ON C.CONSTRAINT_NAME = CU.CONSTRAINT_NAME
+        WHERE C.CONSTRAINT_TYPE = 'PRIMARY KEY')
+ 
+    SELECT  DISTINCT
+            [FK]                    = FK.[name],
+            [Src Schema]            = SCH.[Name],
+            [Src Table]             = SRC.[Name],
+            [Src Column >]          = COL_NAME(FC.parent_object_id, FC.parent_column_id),
+            [< Referenced Column]   = COL_NAME(FC.referenced_object_id, FC.referenced_column_id),
+            [Referenced Table]      = SCH.[Name] + '.' + DEST.[Name],
+            [Supporting Index]      = COALESCE(A.[INDEX] + ' (' + A.[Indexed Columns] + ')', PK.[INDEX] + ' (' + PK.[Indexed Column] + ')'),
+            [Index Type]            = COALESCE(A.[IX_Type], PK.[IX_Type])
+    FROM [sys].[foreign_keys]                       AS FK
+        JOIN [sys].[foreign_key_columns]            AS FC ON FK.[object_id] = fc.constraint_object_id
+        JOIN [sys].[schemas]                        AS SCH ON FK.[schema_id] = SCH.[schema_id]
+        JOIN [sys].[objects]                        AS SRC ON FK.parent_object_id = SRC.[object_id]
+        JOIN [sys].[objects]                        AS DEST ON FK.referenced_object_id = DEST.[object_id]
+        JOIN [sys].[schemas]                        AS SCH2 ON DEST.[schema_id] = SCH2.[schema_id]
+        JOIN [sys].[indexes]                        AS IX ON FK.referenced_object_id = IX.[object_id] AND FK.key_index_id = IX.index_id
+        LEFT JOIN AllIndexes                        AS A ON A.[TABLE_SCHEMA] = SCH.[Name] AND A.[TABLE_NAME] = SRC.[name]
+            AND CHARINDEX(COL_NAME(FC.parent_object_id, FC.parent_column_id), CASE WHEN A.[Indexed Columns] LIKE '%,%' THEN LEFT(A.[Indexed Columns], CHARINDEX(',', A.[Indexed Columns])) ELSE A.[Indexed Columns] END) > 0
+        LEFT JOIN PrimaryKeys                       AS PK ON PK.[TABLE_SCHEMA] = SCH.[Name] AND PK.[TABLE_NAME] = SRC.[name]
+            AND COL_NAME(FC.parent_object_id, FC.parent_column_id) = PK.[Indexed Column]
+    ORDER BY COALESCE(A.[INDEX] + ' (' + A.[Indexed Columns] + ')', PK.[INDEX] + ' (' + PK.[Indexed Column] + ')');
+    GO

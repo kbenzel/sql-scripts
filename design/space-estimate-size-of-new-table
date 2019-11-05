@@ -1,0 +1,28 @@
+-- Estimate size of new table
+
+DECLARE   @Num_Rows INT                   = 30000,  -- Number of rows in the table
+          @Num_Fixed_Cols INT             = 15,     -- Number of non-variable length columns
+          @Fixed_Data_Size INT            = 21,     -- Number of bytes of non-variable length columns
+          @Num_Variable_Cols INT          = 1,      -- Number of variable length columns
+          @Max_Var_Size INT               = 4000,   -- Size of data in variable length columns
+          @Is_clustered_index_unique BIT  = 1,
+          @Fill_Factor INT                = 90;
+ 
+IF (@Is_clustered_index_unique = 0)
+  BEGIN;
+       SELECT @Num_Fixed_Cols = @Num_Fixed_Cols + 1, 
+              @Num_Variable_Cols = @Num_Variable_Cols + 1, 
+              @Max_Var_Size = @Max_Var_Size + 4;
+  END;
+ 
+DECLARE @Null_Bitmap INT = 2 + ((@Num_Fixed_Cols + 7) / 8)
+DECLARE @Variable_Data_Size INT = CASE WHEN @Num_Variable_Cols > 0 THEN 2 + (@Num_Variable_Cols * 2) + @Max_Var_Size ELSE 0 END
+DECLARE @Row_Size INT = @Fixed_Data_Size + @Variable_Data_Size + @Null_Bitmap + 4 -- 4=Row Header Overhead Per Data Row
+DECLARE @Rows_Per_Page FLOAT = FLOOR(8096.0 / (CAST(@Row_Size AS FLOAT) + 2.0))
+DECLARE @Free_Rows_Per_Page FLOAT = FLOOR(8096.0 * ((100.0 - CAST(@Fill_Factor AS FLOAT)) / 100.0) / (CAST(@Row_Size AS FLOAT) + 2.0))
+DECLARE @Num_Pages FLOAT = CEILING(@Num_Rows / (@Rows_Per_Page - @Free_Rows_Per_Page))
+DECLARE @Leaf_space_used BIGINT = 8192 * @Num_Pages
+ 
+SELECT  [Size (Bytes)] = @Leaf_space_used, 
+        [Size (KB)] = CAST(@Leaf_space_used AS FLOAT)/1024.0,  
+        [Size (MB)] = CAST(@Leaf_space_used AS FLOAT)/1024.0/1024.0;

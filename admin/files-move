@@ -1,0 +1,20 @@
+USE [master]
+GO
+
+-- Offline the datbase in prep for move.
+ALTER DATABASE [database] SET OFFLINE WITH ROLLBACK IMMEDIATE
+GO
+
+-- Make file move updates in master
+ALTER DATABASE [database] MODIFY FILE (NAME = N'database',			FILENAME = N'A:\data\database\database.mdf')
+ALTER DATABASE [database] MODIFY FILE (NAME = N'database_data',		FILENAME = N'A:\data\database\database_data.ndf' )
+ALTER DATABASE [database] MODIFY FILE (NAME = N'database_data2',	FILENAME = N'A:\data\database\database_data2.ndf' )
+ALTER DATABASE [database] MODIFY FILE (NAME = N'database_log',		FILENAME = N'A:\data\logs\database_log.ldf')
+GO
+
+-- Manually move the files on the file system now. Note: log files in one folder and the data files in their own folders.
+
+-- Now Online the databse with the files in their new location.
+ALTER DATABASE [database]
+SET ONLINE 
+GO

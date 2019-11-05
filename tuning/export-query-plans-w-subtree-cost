@@ -1,0 +1,14 @@
+--> Output Query Plans with Subtree Cost to a database table
+WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')   
+
+	SELECT	stmt.value('(@StatementText)[1]', 'varchar(max)') AS sql_text,
+			stmt.value('(@StatementSubTreeCost)[1]', 'varchar(max)') as Subtree_Cost,
+			dm_exec_query_plan.query_plan,
+			dm_exec_cached_plans.usecounts AS execution_count
+INTO [dev_database].dbo.execution_plans
+	FROM sys.dm_exec_cached_plans
+		CROSS APPLY sys.dm_exec_query_plan(plan_handle)
+		CROSS APPLY query_plan.nodes('/ShowPlanXML/BatchSequence/Batch/Statements/StmtSimple') AS nodes(stmt)
+
+
+

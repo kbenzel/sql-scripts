@@ -1,0 +1,113 @@
+IF EXISTS(SELECT * FROM sys.server_event_sessions WHERE name = 'failed_logins')
+ DROP EVENT SESSION failed_logins ON SERVER
+GO
+
+CREATE EVENT SESSION failed_logins ON SERVER ADD
+
+EVENT sqlserver.error_reported (
+    ACTION (sqlserver.client_app_name, sqlserver.client_hostname, sqlserver.is_system, sqlserver.username)
+        WHERE (	error_number = 3409 OR error_number = 3409 OR error_number = 6006 OR error_number = 17189 OR error_number = 17194 OR
+				error_number = 17197 OR error_number = 17674 OR error_number = 17805 OR error_number = 17828 OR error_number = 17830 OR
+				error_number = 17832 OR error_number = 17892 OR error_number = 18401 OR error_number = 18451 OR error_number = 18452 OR
+				error_number = 18453 OR error_number = 18454 OR error_number = 18455 OR error_number = 18456 OR error_number = 18458 OR
+				error_number = 18459 OR error_number = 18460 OR error_number = 18461 OR error_number = 18470 OR error_number = 18483 OR
+				error_number = 18485 OR error_number = 18486 OR error_number = 18487 OR error_number = 18488 OR error_number = 18493 OR
+				error_number = 18494 OR error_number = 18495 OR error_number = 19030 OR error_number = 19031 OR error_number = 28046 OR
+				error_number = 28047 OR error_number = 28048 OR error_number = 33041 OR error_number = 608 OR error_number = 17828 OR
+				error_number = 17832))
+
+ADD TARGET package0.event_file (
+    SET    FILENAME = 'failed_logins.xel',
+        metadatafile = 'failed_logins.xem',
+        MAX_FILE_SIZE = 5,
+        MAX_ROLLOVER_FILES = 4),
+
+ADD TARGET package0.ring_buffer(SET MAX_MEMORY=(2048))
+    WITH (    MAX_MEMORY = 2048 KB,
+            EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+            MAX_DISPATCH_LATENCY = 15 SECONDS,
+            MAX_EVENT_SIZE = 0 KB,
+            MEMORY_PARTITION_MODE = NONE,
+            TRACK_CAUSALITY = OFF,
+            STARTUP_STATE = OFF)
+
+GO
+
+ALTER EVENT SESSION failed_logins ON SERVER STATE=START
+GO
+
+-- Stop the event
+ALTER EVENT SESSION failed_logins ON SERVER STATE=STOP
+GO
+
+-- Drop the Event
+DROP EVENT SESSION failed_logins ON SERVER
+GO
+
+
+-- Tell me about my new session!
+SELECT	[Name] = name,
+		[Event Retention Mode] = event_retention_mode_desc,
+		[Max Dispatch Latency (Seconds)] = max_dispatch_latency*.001,
+		[Max Memory (KB)] = max_memory,
+		[Max Event Size (KB)] = CASE WHEN max_event_size = 0 THEN 'Unbounded' ELSE CONVERT(VARCHAR,max_event_size) END,
+		[Memory Partition Mode] = memory_partition_mode_desc,
+        [Track Causality?] = CASE WHEN track_causality = 0 THEN 'NO' ELSE 'YES' END,
+		[Startup State] = CASE WHEN startup_state = 0 THEN 'OFF' ELSE 'ON' END		
+FROM sys.server_event_sessions
+WHERE name = 'failed_logins'
+
+SELECT	[Package],
+		[Action Name] = e.name,
+		[Actions] = (SELECT Package + '.' + Name + ', ' FROM sys.server_event_session_actions AS A WHERE A.event_session_id = E.event_session_id AND A.event_id = E.event_id ORDER BY package, name FOR XML PATH('')),
+		[Predicate] = predicate		
+FROM sys.server_event_session_events AS E
+	INNER JOIN sys.server_event_sessions AS ES ON E.event_session_id = ES.event_session_id
+WHERE ES.name = 'failed_logins';
+
+SELECT	Package,
+		[Target Type] = T.name,
+		Options = (SELECT name + '=' + cast(value AS varchar) + ', ' FROM sys.server_event_session_fields AS F WHERE F.event_session_id = T.event_session_id AND F.object_id = T.target_id FOR XML PATH(''))
+FROM sys.server_event_session_targets AS T
+	INNER JOIN sys.server_event_sessions AS ES ON T.event_session_id = ES.event_session_id
+WHERE ES.name = 'failed_logins';
+
+
+-- Give me XML formated event data from my XML file(s)!
+DECLARE @FileName NVARCHAR(1000) = (SELECT CAST(target_data as XML).value('(/EventFileTarget/File/@name)[1]', 'varchar(8000)')
+FROM sys.dm_xe_session_targets
+WHERE target_name = 'event_file' 
+	AND event_session_address = (SELECT [address] FROM sys.dm_xe_sessions WHERE name = 'failed_logins'));
+
+SELECT	object_name,
+		CAST(event_data AS XML) AS XMLData
+FROM sys.fn_xe_file_target_read_file(@FileName, null, null, null)
+WHERE object_name = 'error_reported';
+
+
+-- Now show me legible event data from Ring Buffer!
+	SELECT CAST(target_data AS XML)
+	FROM sys.dm_xe_sessions AS s 
+		INNER JOIN sys.dm_xe_session_targets AS T ON T.event_session_address = S.address
+	WHERE S.name = 'failed_logins'
+		AND target_name = 'ring_buffer';	
+
+	DECLARE @target_data XML = (
+		SELECT CAST(target_data AS XML)
+		FROM sys.dm_xe_sessions AS s 
+			INNER JOIN sys.dm_xe_session_targets AS T ON T.event_session_address = S.address
+		WHERE S.name = 'failed_logins'
+			AND target_name = 'ring_buffer');
+
+    SELECT	[Timestamp]			= CONVERT(DATETIME,DATEADD(HOUR, DATEDIFF(HOUR, GETUTCDATE(), CURRENT_TIMESTAMP),n.value('(@timestamp)[1]','datetime2'))),
+			[Event]			= n.value('(@name)[1]', 'varchar(50)'),
+			[Package]			= n.value('(@package)[1]', 'varchar(50)'),
+			[Client Hostname]	= n.value('(action[@name="client_hostname"]/value)[1]', 'nvarchar(max)'),
+			[Client App Name]	= n.value('(action[@name="client_app_name"]/value)[1]', 'nvarchar(max)'),
+			[Category]			= n.value('(data[@name="category"]/value)[1]', 'nvarchar(max)'),
+			[Error Number]		= n.value('(data[@name="error_number"]/value)[1]', 'int'),
+			[Severity]			= n.value('(data[@name="severity"]/value)[1]', 'int'),
+			[State]				= n.value('(data[@name="state"]/value)[1]', 'int'),
+			[User Name]			= n.value('(action[@name="username"]/value)[1]', 'nvarchar(max)'),
+			[Message]			= n.value('(data[@name="message"]/value)[1]', 'nvarchar(max)')			
+    FROM @target_data.nodes('RingBufferTarget/event[@name=''error_reported'']') AS q(n);

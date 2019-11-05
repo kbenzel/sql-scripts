@@ -1,0 +1,11 @@
+-- Until I have time to script this out, you'll need to run one database at a time
+-- Do NOT drop a login carelessly
+
+SELECT  LoginName           = SL.name,
+        DefaultDatabase     = SL.dbname,
+        SQL_Fix_Command     = 'USE [master]; ALTER LOGIN ' + QUOTENAME(SL.name) + ' WITH DEFAULT_DATABASE=[master]; CREATE USER ' + QUOTENAME(SL.name) + ' FOR LOGIN ' + QUOTENAME(SL.name) + ' WITH DEFAULT_SCHEMA = [dbo];',
+        SQL_Drop_Command    = 'USE [master]; DROP LOGIN ' + QUOTENAME(SL.name) +';'
+FROM sys.[syslogins] AS SL
+       LEFT JOIN sys.[databases] AS SD ON SL.[dbname] = SD.[name]
+WHERE SD.name IS NULL
+ORDER BY SL.[name], SL.[dbname];

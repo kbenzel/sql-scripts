@@ -1,0 +1,67 @@
+SELECT  [Object Name]         = D.[object_name],
+        [Partition Number]    = D.partition_number,
+        [Column]              = FV.column_name,
+        [Datatype]            = FV.datatype_name,
+        [Partition Function]  = FV.partition_function,
+        [Range Type]          = CASE WHEN FV.boundary_value_on_right = 1 THEN 'RIGHT' WHEN FV.boundary_value_on_right IS NULL THEN NULL ELSE 'LEFT' END,
+        [Partition Scheme]    = FV.partition_scheme,
+        [Range Value]         = FV.value,
+        [Row Count]           = D.row_count,
+        [Size (MB)]           = D.size_mb,
+        [Compression Type]    = P.data_compression_desc
+FROM (
+              SELECT       [OBJECT_NAME]      = T.name,
+                           [SCHEMA_ID]        = S.[SCHEMA_ID],
+                           [object_id]        = T.[OBJECT_ID],
+                           partition_number   = PS.partition_number,
+                           row_count          = REPLACE(CONVERT(NVARCHAR, CAST(SUM(PS.row_count) AS MONEY), 1), '.00', ''),
+                           size_mb            = REPLACE(CONVERT(NVARCHAR, CAST(CAST(SUM(PS.reserved_page_count) AS FLOAT) * 8192.0 /* Bytes Per Page */ / 1024.0 /*KB*/ / 1024.0 /*MB*/ AS MONEY), 1), '.00', '')
+              FROM sys.dm_db_partition_stats  AS PS
+                     INNER JOIN sys.tables    AS T ON PS.[OBJECT_ID] = t.[OBJECT_ID]
+                     INNER JOIN sys.schemas   AS S ON t.[SCHEMA_ID] = s.[SCHEMA_ID]
+                     INNER JOIN (
+                                                SELECT DISTINCT
+                                                              [SCHEMA_ID]   = SS.[SCHEMA_ID],
+                                                              [OBJECT_ID]   = TS.[OBJECT_ID]
+                                                FROM sys.partitions AS PS
+                                                       INNER JOIN sys.tables AS TS ON PS.[OBJECT_ID] = TS.[OBJECT_ID]
+                                                       INNER JOIN sys.schemas AS SS ON TS.[SCHEMA_ID] = ss.[SCHEMA_ID]
+                                                WHERE PS.index_id < 2
+                                                GROUP BY SS.[SCHEMA_ID], TS.[OBJECT_ID]
+                                                HAVING COUNT(*) > 1
+                                     ) AS PL ON PL.[SCHEMA_ID] = S.[SCHEMA_ID] AND PL.[OBJECT_ID] = T.[OBJECT_ID]
+              WHERE PS.index_id < 2
+              GROUP BY t.name, PS.partition_number, s.[SCHEMA_ID], t.[OBJECT_ID]) AS D
+    INNER JOIN (
+                                  SELECT  DISTINCT
+                                          [OBJECT_ID],
+                                          partition_number,
+                                          data_compression_desc
+                                  FROM sys.partitions
+                                  WHERE index_id < 2
+               ) AS P ON D.[OBJECT_ID] = P.[OBJECT_ID] AND D.partition_number = P.partition_number
+    LEFT OUTER JOIN (
+                                     SELECT            [SCHEMA_ID]                      = S.[SCHEMA_ID],
+                                                       [OBJECT_ID]                      = T2.[OBJECT_ID],
+                                                       [column_name]                    = C.name,
+                                                       [datatype_name]                  = T.name,
+                                                       partition_function               = PF.name,
+                                                       boundary_value_on_right          = PF.boundary_value_on_right,
+                                                       partition_scheme                 = PS.name,
+                                                       function_id                      = PRV.function_id,
+                                                       boundary_id                      = PRV.boundary_id,
+                                                       parameter_id                     = PRV.parameter_id,
+                                                       value                            = PRV.value
+                                     FROM sys.partition_functions                 AS pf
+                                         INNER JOIN sys.partition_parameters      AS pp ON pf.function_id = pp.function_id
+                                         INNER JOIN sys.partition_range_values    AS prv ON pp.function_id = PRV.function_id AND pp.parameter_id = PRV.parameter_id
+                                         INNER JOIN sys.types                     AS t ON pp.system_type_id = t.system_type_id
+                                         INNER JOIN sys.partition_schemes         AS ps ON PS.function_id = pf.function_id
+                                         INNER JOIN sys.data_spaces               AS ds ON ds.data_space_id = PS.data_space_id
+                                         INNER JOIN sys.indexes                   AS i ON PS.data_space_id = i.data_space_id AND i.index_id = 1
+                                         INNER JOIN sys.index_columns             AS ic ON i.index_id = ic.index_id AND i.[OBJECT_ID] = ic.[OBJECT_ID]
+                                         INNER JOIN sys.columns                   AS c ON ic.column_id = c.column_id AND ic.[OBJECT_ID] = c.[OBJECT_ID] AND c.system_type_id = pp.system_type_id
+                                         INNER JOIN sys.tables                    AS t2 ON t2.[OBJECT_ID] = i.[OBJECT_ID]
+                                         INNER JOIN sys.schemas                   AS s ON s.[SCHEMA_ID] = t2.[SCHEMA_ID]
+              ) AS fv ON d.[SCHEMA_ID] = FV.[SCHEMA_ID] AND d.[OBJECT_ID] = FV.[OBJECT_ID] AND d.partition_number = FV.boundary_id
+       ORDER BY D.[object_name], D.partition_number;

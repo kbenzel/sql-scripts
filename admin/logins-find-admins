@@ -1,0 +1,204 @@
+USE [master];
+GO
+SET NOCOUNT ON
+GO
+ 
+       IF OBJECT_ID('tempdb.dbo.#temp_srvrole','U') IS NOT NULL DROP TABLE #temp_srvrole
+       CREATE TABLE #temp_srvrole (
+              ServerRole VARCHAR(128),
+              [Description] VARCHAR(128));
+ 
+       IF OBJECT_ID('tempdb.dbo.#SQLLogins','U') IS NOT NULL DROP TABLE #SQLLogins
+       CREATE TABLE #SQLLogins(
+              LoginID INT IDENTITY(1,1) PRIMARY KEY NOT NULL,
+              ServerName NVARCHAR(50),
+              LoginType NVARCHAR(100),
+              LoginName NVARCHAR(1000),
+              LoginCreateDate DATETIME,
+              LastLogin DATETIME,
+              sysadmin BIT,
+              securityadmin BIT,
+              serveradmin BIT,
+              setupadmin BIT,
+              processadmin BIT,
+              diskadmin BIT,
+              dbcreator BIT,
+              bulkadmin BIT,
+              isInvalidLogin BIT DEFAULT 0,
+              isLocalAdmin BIT DEFAULT 0,
+              isSysAdmin BIT DEFAULT 0);
+ 
+       IF OBJECT_ID('tempdb.dbo.#temp_rolemember','U') IS NOT NULL DROP TABLE #temp_rolemember
+       CREATE TABLE #temp_rolemember (
+              DbRole VARCHAR(128),
+              MemberName VARCHAR(128),
+              MemberSID VARCHAR(1000))
+ 
+       IF OBJECT_ID('tempdb.dbo.#temp_rolemember_final','U') IS NOT NULL DROP TABLE #temp_rolemember_final;
+              CREATE TABLE #temp_rolemember_final (
+                     DbName VARCHAR(100),
+                     DbRole VARCHAR(128),
+                     MemberName VARCHAR(128));
+ 
+       DECLARE @InvalidLogins TABLE (
+              [SID] NVARCHAR(256),
+              InvalidLogin NVARCHAR(100));
+ 
+       DECLARE @LocalAdmin TABLE (
+              [output] VARCHAR(8000));
+ 
+       DECLARE @dbname VARCHAR(128);
+       DECLARE @sqlcmd2 VARCHAR(1000);
+ 
+       -- Retrieve server roles
+       INSERT INTO #temp_srvrole
+       EXEC sp_helpsrvrole;
+      
+       -- Retrieve logins
+       INSERT INTO #SQLLogins
+       (ServerName, LoginType, LoginName, LoginCreateDate, LastLogin, sysadmin, securityadmin, serveradmin, setupadmin, processadmin, diskadmin, dbcreator, bulkadmin)
+       SELECT @@SERVERNAME,
+                     CASE WHEN isntgroup = 0 AND isntname = 1 THEN 'Individual NT Login'
+                           WHEN isntgroup = 0 AND isntname = 0 THEN 'Individual SQL Login'
+                           WHEN isntgroup = 1 THEN 'NT Group Login'
+                     ELSE NULL END,
+                     S.name,
+                     S.createdate,
+                     L.login_time,
+                     S.sysadmin,
+                     S.securityadmin,
+                     S.serveradmin,
+                     S.setupadmin,
+                     S.processadmin,
+                     S.diskadmin,
+                     S.dbcreator,
+                     S.bulkadmin
+       FROM syslogins AS S
+              LEFT OUTER JOIN (
+                     SELECT MAX(login_time) AS login_time, loginame
+                     FROM sysprocesses
+                     GROUP BY loginame) AS L ON S.name = L.loginame;
+ 
+       -- Database Roles for members for all databases
+       DECLARE grp_role CURSOR FOR
+       SELECT name FROM sysdatabases WHERE name NOT IN ('tempdb')
+ 
+       OPEN grp_role
+       FETCH NEXT FROM grp_role INTO @dbname
+ 
+       WHILE @@FETCH_STATUS = 0
+       BEGIN
+              SET @sqlcmd2 = 'EXEC [' + @dbname + ']..sp_helprolemember'
+ 
+              INSERT INTO #temp_rolemember
+              EXECUTE(@sqlcmd2)
+ 
+              INSERT INTO #temp_rolemember_final
+              SELECT @dbname AS DbName, DbRole, MemberName
+              FROM #temp_rolemember
+ 
+              FETCH NEXT FROM grp_role INTO @dbname
+       END
+ 
+       CLOSE grp_role
+       DEALLOCATE grp_role
+ 
+       -- Retrieve other login types
+       INSERT INTO #SQLLogins
+       (ServerName, LoginType, LoginName, LastLogin)
+       SELECT DISTINCT @@SERVERNAME,
+                     'Other',
+                     MemberName,
+                     ll.login_time
+       FROM #temp_rolemember_final AS trf
+              LEFT OUTER JOIN (
+                     SELECT MAX(login_time) AS login_time,
+                                  loginame
+                     FROM sysprocesses
+                     GROUP BY loginame) AS ll
+                           ON trf.MemberName = ll.loginame
+       WHERE trf.MemberName NOT IN (SELECT LoginName FROM #SQLLogins)
+ 
+       -- Retrieve Local Admins
+       INSERT INTO @LocalAdmin
+       EXEC xp_cmdshell 'net localgroup administrators';
+ 
+       UPDATE #SQLLogins
+       SET isLocalAdmin = 1
+       WHERE LoginName IN (SELECT [output] FROM @LocalAdmin);
+ 
+       -- Invalid logins   
+       INSERT INTO @InvalidLogins
+       EXEC sp_validatelogins;
+ 
+       UPDATE #SQLLogins
+       SET isInvalidLogin = 1
+       WHERE LoginName IN (SELECT InvalidLogin FROM @InvalidLogins);
+ 
+       -- System Admins
+       UPDATE #SQLLogins
+       SET isSysAdmin = 1
+       WHERE LoginName IN (SELECT name FROM sys.server_principals WHERE IS_SRVROLEMEMBER('sysadmin', name) = 1);
+ 
+       -- IF BUILTIN\Administrators is exist and sysadmin
+       IF EXISTS(SELECT * FROM #SQLLogins WHERE LoginName = 'BUILTIN\Administrators' AND LoginName IN (SELECT name FROM sys.server_principals WHERE IS_SRVROLEMEMBER('sysadmin', name) = 1))
+              BEGIN;
+                     IF OBJECT_ID('tempdb.dbo.#temp_localadmin','U') IS NOT NULL DROP TABLE #temp_localadmin
+                     CREATE TABLE #temp_localadmin (output VARCHAR(8000))
+                     INSERT INTO #temp_localadmin
+                     EXEC xp_cmdshell 'net localgroup administrators'
+ 
+                     INSERT INTO #SQLLogins (ServerName, LoginType, LoginName)
+                     SELECT @@SERVERNAME,
+                                  'net localgroup administrator',
+                                  [output]
+                     FROM #temp_localadmin
+                     WHERE [output] NOT IN (SELECT LoginName FROM #SQLLogins)
+                           AND [output] NOT IN (
+                                  'Alias name     administrators',
+                                  'Comment        Administrators have complete and unrestricted access to the computer/domain',
+                                  'Members',
+                                  '-------------------------------------------------------------------------------',
+                                  'The command completed successfully.')
+              END;
+ 
+       WITH Orphans AS (
+              SELECT LoginName            = SL.name,
+                           DefaultDatabase = SL.dbname
+              FROM sys.[syslogins] SL
+                     LEFT JOIN sys.[databases] SD ON SL.[dbname] = SD.[name]
+              WHERE SD.name IS NULL)
+ 
+       SELECT [Database]           = trf.DbName,
+                     [LoginName]                = sl.LoginName,
+                     [Login Type]  = sl.LoginType,
+                     [Last Login]  = sl.LastLogin,
+                     [Login Create Date]  = sl.LoginCreateDate,
+                     [InvalidLogin]       = sl.isInvalidLogin,
+                     [Orphan Login]       = CASE WHEN TRF.LoginName IS NULL THEN 0 ELSE 1 END,
+                     [LocalAdmin]  = sl.isLocalAdmin,
+                     [SysAdmin]           = sl.isSysAdmin,
+                     [Roles]                    = trf.DbRole              
+       FROM #SQLLogins AS sl
+              LEFT OUTER JOIN (
+                     SELECT dbName,
+                                  MemberName,
+                                  DbRole = STUFF ((
+                                                SELECT DISTINCT ', ' + DbRole
+                                                from #temp_rolemember_final AS S
+                                                WHERE S.dbName = C.dbName
+                                                       AND S.MemberName = C.MemberName
+                                                FOR XML PATH ('')
+                                         ), 1, 1, ''),
+                                  O.LoginName
+                     FROM #temp_rolemember_final AS C
+                     LEFT OUTER JOIN Orphans AS O ON O.DefaultDatabase = C.dbName
+                     GROUP BY C.dbName, C.MemberName, O.LoginName) AS trf ON sl.LoginName = trf.MemberName
+ORDER BY             sl.isSysAdmin DESC,
+                     sl.isInvalidLogin DESC,
+                     CASE WHEN TRF.LoginName IS NULL THEN 0 ELSE 1 END DESC,
+                     trf.DbName DESC,
+                     sl.LoginName,
+                     sl.LoginType,
+                     sl.LastLogin
+ 

@@ -1,0 +1,15 @@
+DECLARE @index_name AS NVARCHAR(128) = '[NCIX_tableName_indexName]';
+ 
+WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')   
+SELECT	stmt.value('(@StatementText)[1]', 'varchar(max)') AS sql_text,
+	obj.value('(@Database)[1]', 'varchar(128)') AS database_name,
+	obj.value('(@Schema)[1]', 'varchar(128)') AS schema_name,
+	obj.value('(@Table)[1]', 'varchar(128)') AS table_name,
+	obj.value('(@Index)[1]', 'varchar(128)') AS index_name,
+	obj.value('(@IndexKind)[1]', 'varchar(128)') AS index_type,
+	dm_exec_query_plan.query_plan,
+	dm_exec_cached_plans.usecounts AS execution_count
+FROM sys.dm_exec_cached_plans
+	CROSS APPLY sys.dm_exec_query_plan(plan_handle)
+	CROSS APPLY query_plan.nodes('/ShowPlanXML/BatchSequence/Batch/Statements/StmtSimple') AS nodes(stmt)
+	CROSS APPLY stmt.nodes('.//IndexScan/Object[@Index=sql:variable("@index_name")]') AS index_object(obj)

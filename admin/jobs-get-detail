@@ -1,0 +1,194 @@
+USE [MSDB];
+GO
+ 
+/*
+-> Runs on SQL 2012
+-> Two different result sets based on if @JobName IS NULL or NOT NULL
+ 
+-- BOL References
+-- sysjobs: msdn.microsoft.com/en-us/library/aa260415%28v=sql.80%29.aspx
+-- sysschedules: msdn.microsoft.com/en-us/library/ms178644.aspx
+-- sysjobservers: msdn.microsoft.com/en-us/library/ms187761.aspx
+-- sysjobsteps: msdn.microsoft.com/en-us/library/ms187387.aspx
+-- sysjobhistory: msdn.microsoft.com/en-us/library/ms174997.aspx
+*/
+ 
+DECLARE @JobName VARCHAR(255) = NULL,
+              @IncludeSteps BIT = 1,
+              @IncludeFailures BIT = 1,
+              @IncludeRuns BIT = 1;
+ 
+DECLARE @JobsRunning TABLE(
+  job_id UNIQUEIDENTIFIER,
+  last_run_date INT,
+  last_run_time INT,
+  next_run_date INT,
+  next_run_time INT,
+  next_run_schedule_id INT,
+  requested_to_run INT,
+  request_source INT,
+  request_source_id VARCHAR(100),
+  running INT,
+  current_step INT,
+  current_retry_attempt INT,
+  [state] INT)
+ 
+INSERT INTO @JobsRunning
+EXEC master.dbo.xp_sqlagent_enum_jobs 1, ''
+ 
+IF @JobName IS NULL
+BEGIN;
+       SELECT DISTINCT [Job Name] = J.name,
+                     [Job ID] = J.job_id,
+                     [Job Enabled] = J.enabled,
+                     [Is Running] = JR.running,
+                     [SPID] = SYSP.spid,
+                     [Description] = CASE WHEN LEN(J.description) > 40 THEN LEFT(J.description,40) + ' ...' ELSE J.description END,
+                     [Last Run] = CASE WHEN JSVR.last_run_date <> 0 THEN dbo.agent_datetime(JSVR.last_run_date,JSVR.last_run_time) ELSE '1/1/1973 12:00:00' END,
+                     [Last Run Status] = CASE WHEN JSVR.last_run_outcome = 0 THEN 'Failed'
+                                                              WHEN JSVR.last_run_outcome = 1 THEN 'Succeeded'
+                                                       ELSE 'Canceled' END,
+                     [Last Run Duration (hh:mm:ss)] = LEFT(RIGHT('000000' + CONVERT(VARCHAR,JSVR.last_run_duration),6),2) + ':' + SUBSTRING(RIGHT('000000' + CONVERT(VARCHAR,JSVR.last_run_duration),6),3,2) + ':' + RIGHT(RIGHT('000000' + CONVERT(VARCHAR,JSVR.last_run_duration),6),2),
+                     [Last Run Message] = LEFT(JSVR.last_outcome_message, CHARINDEX('The last step', JSVR.last_outcome_message)-3),
+                     [Next Run] = CASE WHEN JSCH.next_run_date <> 0 THEN dbo.agent_datetime(JSCH.next_run_date,JSCH.next_run_time) ELSE '1/1/1973 12:00:00' END,
+                     [Failures This Week] = COALESCE(WFL.Week_Failures,0),
+                     [Failures This Month] = COALESCE(MFL.Month_Failures,0),             
+                     [Job Category] = REPLACE(REPLACE(SYSCAT.name,'[',''),']',''),
+                     [Job Owner] = COALESCE(SVRP.name,'[none]'),
+                     [Created] = convert(char(10), J.date_created, 101),
+                     [Modified] = convert(char(10), J.date_modified, 101),        
+                     [Schedule Enabled] = SS.enabled, 
+                     [Schedule Owner] = COALESCE(SVRP2.name,'[none]'),
+                     [Job Ends] = CASE WHEN active_end_date = 99991231 THEN 'Never' ELSE CONVERT(VARCHAR,dbo.agent_datetime(active_end_date,0)) END,                                    
+                     [Notifies Event Log] = CASE WHEN J.notify_level_eventlog = 0 THEN 'Never'
+                                                                     WHEN J.notify_level_eventlog = 1 THEN 'When the job succeeds'
+                                                                     WHEN J.notify_level_eventlog = 2 THEN 'When the job fails'
+                                                                     WHEN J.notify_level_eventlog = 3 THEN 'Whenever the job completes (regardless of the job outcome)'
+                                                              ELSE 'Dunno?' END
+       FROM sysjobs AS J
+              INNER JOIN syscategories AS SYSCAT ON J.category_id = SYSCAT.category_id
+              LEFT OUTER JOIN sys.server_principals AS SVRP ON J.owner_sid = SVRP.SID
+              INNER JOIN @JobsRunning AS JR ON J.job_id = JR.job_id
+              INNER JOIN sysjobservers AS JSVR ON J.job_id = JSVR.job_id
+              INNER JOIN sys.servers AS SVR ON JSVR.server_id = SVR.server_id
+              INNER JOIN sysjobschedules AS JSCH ON J.job_id = JSCH.job_id
+              INNER JOIN sysschedules AS SS ON JSCH.schedule_id = SS.schedule_id
+              LEFT OUTER JOIN sys.server_principals AS SVRP2 ON SVRP2.SID = SS.owner_sid
+              LEFT OUTER JOIN master.dbo.sysprocesses AS SYSP ON SYSP.[program_name] LIKE '%' + RIGHT(REPLACE(CAST(J.job_id AS VARCHAR(36)), '-', ''), 16) + '%'
+              LEFT OUTER JOIN (SELECT job_id, Month_Failures = COUNT(job_id) FROM sysjobhistory
+                                         WHERE run_status = 0 AND step_id > 0 AND dbo.agent_datetime(run_date,run_time) >= DATEADD(DAY,-30,GETDATE()) GROUP BY job_id) AS MFL
+                                                ON J.job_id = MFL.job_id
+              LEFT OUTER JOIN (SELECT job_id, Week_Failures = COUNT(job_id) FROM sysjobhistory
+                                         WHERE run_status = 0 AND step_id > 0 AND dbo.agent_datetime(run_date,run_time) >= DATEADD(DAY,-30,GETDATE()) GROUP BY job_id) AS WFL
+                                                ON J.job_id = WFL.job_id
+       ORDER BY JR.running DESC, COALESCE(WFL.Week_Failures,0) DESC
+END;
+ 
+ 
+IF @JobName IS NOT NULL
+BEGIN;
+       SELECT [Job Name] = J.name,
+                     [Job ID] = J.job_id,
+                     [Job Enabled] = J.enabled,
+                     [Is Running] = JR.running,
+                     [SPID] = SYSP.spid,
+                     [Description] = CASE WHEN LEN(J.description) > 40 THEN LEFT(J.description,40) + ' ...' ELSE J.description END,
+                     [Last Run] = dbo.agent_datetime(JSVR.last_run_date,JSVR.last_run_time),
+                     [Last Run Status] = CASE WHEN JSVR.last_run_outcome = 0 THEN 'Failed'
+                                                              WHEN JSVR.last_run_outcome = 1 THEN 'Succeeded'
+                                                       ELSE 'Canceled' END,
+                     [Last Run Duration (hh:mm:ss)] = LEFT(RIGHT('000000' + CONVERT(VARCHAR,JSVR.last_run_duration),6),2) + ':' + SUBSTRING(RIGHT('000000' + CONVERT(VARCHAR,JSVR.last_run_duration),6),3,2) + ':' + RIGHT(RIGHT('000000' + CONVERT(VARCHAR,JSVR.last_run_duration),6),2),
+                     [Last Run Message] = LEFT(JSVR.last_outcome_message, CHARINDEX('The last step', JSVR.last_outcome_message)-3),
+                     [Next Run] = dbo.agent_datetime(JSCH.next_run_date,JSCH.next_run_time),
+                     [Failures This Week] = COALESCE(WFL.Week_Failures,0),
+                     [Failures This Month] = COALESCE(MFL.Month_Failures,0),             
+                     [Job Category] = REPLACE(REPLACE(SYSCAT.name,'[',''),']',''),
+                     [Job Owner] = COALESCE(SVRP.name,'[none]'),
+                     [Created] = convert(char(10), J.date_created, 101),
+                     [Modified] = convert(char(10), J.date_modified, 101),        
+                     [Schedule Enabled] = SS.enabled, 
+                     [Schedule Owner] = COALESCE(SVRP2.name,'[none]'),
+                     [Job Ends] = CASE WHEN active_end_date = 99991231 THEN 'Never' ELSE CONVERT(VARCHAR,dbo.agent_datetime(active_end_date,0)) END,                                    
+                     [Notifies Event Log] = CASE WHEN J.notify_level_eventlog = 0 THEN 'Never'
+                                                                     WHEN J.notify_level_eventlog = 1 THEN 'When the job succeeds'
+                                                                     WHEN J.notify_level_eventlog = 2 THEN 'When the job fails'
+                                                                     WHEN J.notify_level_eventlog = 3 THEN 'Whenever the job completes (regardless of the job outcome)'
+                                                              ELSE 'Dunno?' END,
+                     [Server] = UPPER(SVR.name)
+       FROM sysjobs AS J
+              INNER JOIN syscategories AS SYSCAT ON J.category_id = SYSCAT.category_id
+              LEFT OUTER JOIN sys.server_principals AS SVRP ON J.owner_sid = SVRP.SID
+              INNER JOIN @JobsRunning AS JR ON J.job_id = JR.job_id
+              INNER JOIN sysjobservers AS JSVR ON J.job_id = JSVR.job_id
+              INNER JOIN sys.servers AS SVR ON JSVR.server_id = SVR.server_id
+              INNER JOIN sysjobschedules AS JSCH ON J.job_id = JSCH.job_id
+              INNER JOIN sysschedules AS SS ON JSCH.schedule_id = SS.schedule_id
+              LEFT OUTER JOIN sys.server_principals AS SVRP2 ON SVRP2.SID = SS.owner_sid
+              LEFT OUTER JOIN master.dbo.sysprocesses AS SYSP ON SYSP.[program_name] LIKE '%' + RIGHT(REPLACE(CAST(J.job_id AS VARCHAR(36)), '-', ''), 16) + '%'
+              LEFT OUTER JOIN (SELECT job_id, Month_Failures = COUNT(job_id) FROM sysjobhistory
+                                         WHERE run_status = 0 AND step_id > 0 AND dbo.agent_datetime(run_date,run_time) >= DATEADD(DAY,-30,GETDATE()) GROUP BY job_id) AS MFL
+                                                ON J.job_id = MFL.job_id
+              LEFT OUTER JOIN (SELECT job_id, Week_Failures = COUNT(job_id) FROM sysjobhistory
+                                         WHERE run_status = 0 AND step_id > 0 AND dbo.agent_datetime(run_date,run_time) >= DATEADD(DAY,-30,GETDATE()) GROUP BY job_id) AS WFL
+                                                ON J.job_id = WFL.job_id
+       WHERE J.name LIKE '%' + @JobName + '%'
+       ORDER BY JR.running DESC, SYSP.spid DESC, J.name ASC
+ 
+       -- Steps
+       IF @IncludeSteps = 1
+       BEGIN;
+              SELECT [Step] = '['+ CONVERT(VARCHAR, JS.step_id) + '] ' + JS.step_name,
+                           [Command] = '[' + JS.subsystem + '] ' + JS.command,
+                           [Server] = ISNULL(UPPER(JS.server),'[no server]'),
+                           [Database] = ISNULL(UPPER(JS.database_name),'[no database]'),
+                           [User] = ISNULL(UPPER(JS.database_user_name),'[no user]'),
+                           JS.on_success_action,
+                           JS.on_success_step_id,
+                           JS.on_fail_action,
+                           JS.on_fail_step_id,
+                           JS.retry_attempts,
+                           JS.retry_interval
+              FROM sysjobs AS J
+                     INNER JOIN sysjobsteps AS JS ON J.job_id = JS.job_id
+              WHERE J.name LIKE '%' + @JobName + '%'
+              ORDER BY JS.job_id, JS.step_id;
+       END;
+ 
+       -- Last 10 Failures
+       IF @IncludeFailures = 1
+       BEGIN;
+              SELECT TOP 10
+                           [Failed Step] = COALESCE(SPACE(5)+'['+ CONVERT(VARCHAR, JS.step_id) + '] ' + JS.step_name,REPLACE(REPLACE(JH.step_name,'(',''),')','')),
+                           [Date Ran] = dbo.agent_datetime(JH.run_date,JH.run_time),
+                           [Duration (hh:mm:ss)] = LEFT(RIGHT('000000' + CONVERT(VARCHAR,JH.run_duration),6),2) + ':' + SUBSTRING(RIGHT('000000' + CONVERT(VARCHAR,JH.run_duration),6),3,2) + ':' + RIGHT(RIGHT('000000' + CONVERT(VARCHAR,JH.run_duration),6),2),
+                           [Retries] = JH.retries_attempted,
+                           [Result] = CASE WHEN run_status = 0 THEN 'Failed'
+                                                       WHEN run_status = 1 THEN 'Succeeded'
+                                                       WHEN run_status = 2 THEN 'Retry'
+                                                       WHEN run_status = 3 THEN 'Canceled'
+                                                ELSE '?' END,
+                           [Error] = 'Message: ' + CONVERT(VARCHAR,JH.sql_message_id) + ' Severity: ' + CONVERT(VARCHAR,JH.sql_severity) + SPACE(1) + JH.message
+              FROM sysjobs AS J
+                     INNER JOIN sysjobhistory AS JH ON J.job_id = JH.job_id
+                     LEFT OUTER JOIN sysjobsteps AS JS ON J.job_id = JS.job_id
+                           AND JH.step_id = JS.step_id
+              WHERE J.name LIKE '%' + @JobName + '%'
+                     AND JH.run_status <> 1
+              ORDER BY JH.instance_id DESC;
+       END;
+ 
+       -- Last 10 Runs
+       IF @IncludeRuns = 1
+       BEGIN;
+              SELECT TOP 10
+                           [Run] = dbo.agent_datetime(JH.run_date,JH.run_time),
+                           [Duration (hh:mm:ss)] = LEFT(RIGHT('000000' + CONVERT(VARCHAR,JH.run_duration),6),2) + ':' + SUBSTRING(RIGHT('000000' + CONVERT(VARCHAR,JH.run_duration),6),3,2) + ':' + RIGHT(RIGHT('000000' + CONVERT(VARCHAR,JH.run_duration),6),2)
+              FROM sysjobs AS J
+                     INNER JOIN sysjobhistory AS JH ON J.job_id = JH.job_id
+              WHERE J.name LIKE '%' + @JobName + '%'
+                     AND JH.run_status = 1
+                     AND JH.step_id = 0
+              ORDER BY JH.instance_id DESC;
+       END;
+ 
+END;

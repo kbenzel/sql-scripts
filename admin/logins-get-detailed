@@ -1,0 +1,154 @@
+/*******************************************************************************
+Source: http://www.sqlservercentral.com/articles/Security/76919/
+ 
+2/16/2012 kbenzel
+ 
+Note: There are a wide variety of built in server or database level roles that
+grant elevated permissions for tasks such as:
+ 
+selecting from all tables (db_datareader),
+viewing object definitions (VIEW DEFINITION)
+querying execution plans (SHOWPLAN)
+dynamic management views (VIEW SERVER STATE)
+ 
+Therefore, as you review what accounts currently have admin role membership, keep in mind that permission to
+perform the type of tasks mentioned above does not require full admin role privileges.
+*******************************************************************************/
+SET XACT_ABORT OFF;
+SET NOCOUNT ON;
+ 
+DECLARE @Principals TABLE(
+       primary key (principal_type,principal_name,member_name),
+       principal_type VARCHAR(180) NOT NULL,
+       principal_name VARCHAR(180) NOT NULL,
+       member_name VARCHAR(180) NOT NULL,
+       create_date DATETIME NULL,
+       modify_date DATETIME NULL,
+       admin_role_desc VARCHAR(180) NULL,
+       logininfo_note VARCHAR(8000) NULL);
+      
+ 
+-- insert all accounts and groups into result:
+INSERT INTO @Principals
+(principal_type, principal_name, member_name, create_date, modify_date, admin_role_desc, logininfo_note)
+SELECT type_desc,
+              name,
+              '-',
+              create_date,
+              modify_date,
+              (CASE is_srvrolemember('sysadmin',name) WHEN 1 THEN 'sysadmin |' ELSE NULL END
+                + CASE is_srvrolemember('securityadmin',name) WHEN 1 THEN ' securityadmin |' ELSE NULL END
+                + CASE is_srvrolemember('serveradmin',name) WHEN 1 THEN ' serveradmin |' ELSE NULL END
+                + CASE is_srvrolemember('setupadmin',name) WHEN 1 THEN ' setupadmin |' ELSE NULL END 
+                + CASE is_srvrolemember('processadmin',name) WHEN 1 THEN ' processadmin |' ELSE NULL END 
+                + CASE is_srvrolemember('diskadmin',name) WHEN 1 THEN ' diskadmin |' ELSE NULL END 
+                + CASE is_srvrolemember('dbcreator',name) WHEN 1 THEN ' dbcreator |' ELSE NULL END 
+                + CASE is_srvrolemember('bulkadmin',name) WHEN 1 THEN ' bulkadmin |' ELSE NULL END
+              ),
+              NULL
+FROM sys.server_principals;
+ 
+DECLARE @admin_groups TABLE(
+       primary key (group_type,group_name),
+       group_type VARCHAR(180) NOT NULL,
+       group_name VARCHAR(180) NOT NULL);
+ 
+DECLARE @logininfo TABLE(
+       primary key (account_name,permission_path),
+       account_name VARCHAR(180) NOT NULL,
+       type VARCHAR(180) NULL,
+       privilege VARCHAR(180) NULL,
+       mapped_login_name VARCHAR(180) NULL,
+       permission_path VARCHAR(180) NOT NULL);
+ 
+-- For each domain group with admin privilages, insert one record for each of it's member accounts into the result:
+DECLARE @group_type VARCHAR(180)
+DECLARE @group_name VARCHAR(180);
+ 
+SELECT @group_type = '*',
+              @group_name = '*';
+WHILE @group_name IS NOT NULL
+BEGIN
+       SELECT @group_type = NULL, @group_name = NULL;
+       SELECT TOP 1 @group_type = principal_type, @group_name = principal_name
+       FROM @Principals
+       WHERE principal_type in ('windows_group')
+              AND member_name = '-'     
+              and admin_role_desc IS NOT NULL
+              and principal_name not in (select group_name from @admin_groups);
+      
+       IF @group_name IS NOT NULL
+         BEGIN
+              -- Call xp_logininfo to return all domain accounts belonging to group:
+              INSERT INTO @admin_groups
+              VALUES (@group_type, @group_name);
+  begin try
+   delete from @logininfo;
+   insert into @logininfo
+    EXEC [master].[dbo].[xp_logininfo] @group_name, 'members';
+ 
+       -- Update number of members for group to logininfo_note:
+    UPDATE @Principals
+    SET logininfo_note = 'xp_logininfo returned ' + CAST (@@ROWCOUNT AS VARCHAR(9)) + ' members.'
+     where principal_type in ('windows_group')
+      and principal_name = @group_name
+      and member_name = '-';  
+  end try
+  begin catch
+   -- If an error occurred, then update it to logininfo_note, and then continue:
+     update @Principals
+    set logininfo_note = 'xp_logininfo returned error '+cast(error_number() as VARCHAR(9))
+     where principal_type in ('windows_group')
+      and principal_name = @group_name
+      and member_name = '-';
+  end catch
+  -- For each group member, insert a record into the result:
+  INSERT INTO @Principals
+  select
+   @group_type as principal_type,
+   @group_name as principal_name,
+   account_name as member_name,
+   NULL as create_date,
+   NULL as modify_date,
+   (select admin_role_desc
+    from @Principals
+     where principal_type = @group_type
+     and principal_name = @group_name
+     and member_name = '-') as admin_role_desc,
+   NULL as logininfo_note
+  from @logininfo;
+  -- For each group member that is a group,
+  -- insert a record of type 'WINDOWS_GROUP' into the result:
+  INSERT INTO @Principals
+       SELECT 'WINDOWS_GROUP' AS principal_type,
+                     account_name AS principal_name,
+                     '-' AS member_name,
+                     NULL AS create_date,
+                     NULL AS modify_date,
+   (select admin_role_desc
+    from @Principals
+     where principal_type = @group_type
+     and principal_name = @group_name
+     and member_name = '-') AS admin_role_desc,
+              NULL as logininfo_note
+       FROM @logininfo
+       WHERE type = 'group'
+              AND NOT EXISTS (SELECT 1 FROM @Principals WHERE principal_type = 'WINDOWS_GROUP' AND principal_name = account_name AND member_name = '-');
+  END; 
+ END;
+ 
+-- Return result of only those accounts, groups, and members who have an admin role:
+SELECT principal_type,
+              CASE   WHEN principal_type = 'SQL_LOGIN' THEN 'When a server was configured to use mixed authentication (SQL Server & Windows) then SQL_LOGIN will be ‘SA’ or other additional SQL Server accounts'
+                           WHEN principal_type = 'WINDOWS_GROUP' THEN 'Domain group accounts'
+                           WHEN principal_type = 'WINDOWS_LOGIN' THEN 'Local or domain accounts'
+              ELSE '' END AS principal_description,
+              principal_name,
+              COALESCE(logininfo_note,'') AS 'logininfo_note',
+              member_name,
+              create_date,
+              modify_date,
+              admin_role_desc
+FROM @Principals
+WHERE admin_role_desc IS NOT NULL
+ORDER BY principal_type, principal_name, member_name;

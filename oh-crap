@@ -1,0 +1,56 @@
+
+SELECT	[SPID]				= ES.session_id,
+		[Kill]				= 'kill ' + CONVERT(VARCHAR, ES.Session_ID),
+		[Statement Running]	= MAX(CASE ER.[statement_end_offset] WHEN -1 THEN SUBSTRING(EST.[TEXT], (ER.[statement_start_offset]/2) + 1, 2147483647) ELSE SUBSTRING(EST.[TEXT],(ER.[statement_start_offset]/2) + 1, (ER.[statement_end_offset] - ER.[statement_start_offset])/2) END),
+		[SQL Statement]		= RTRIM(LTRIM(EST.[text])),
+		[BlkBy]				= COALESCE(W.blocking_session_id, TL.blkby),
+		[CPU (ms)]			= COALESCE(ES.cpu_time, ER.cpu_time, 0),
+		[I/O (MB)]			= SUM((ES.reads + ES.writes) * 8 / 1024), 
+		[Memory (KB)]		= SUM((ES.memory_usage) * 8192 / 1024), 
+		[Status]			= UPPER(COALESCE(ER.[status], ES.[status])),
+		[Database]			= MAX(DB_NAME(COALESCE(SP.[DBID], ER.database_id, ES.database_id, N''))),
+		[Hostname]			= MAX(COALESCE(UPPER(ES.[host_name]), N'')),
+		[Application]		= COALESCE(LEFT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ES.[program_name], 
+								'Microsoft SQL Server Management Studio - Query', 'SSMS'), 
+								'Microsoft SQL Server Management Studio', 'SSMS'), 
+								'SSMS - Transact-SQL IntelliSense', 'IntelliSense'),
+								'SQLAgent - Job invocation engine', 'SQLAgent'), 
+								'SQLAgent - Alert Engine', 'SQLAgent'), 
+								'SQLAgent - Email Logger', 'SQLAgent'), 
+								'SQLAgent - Generic Refresher', 'SQLAgent'), 30), N''),
+		[Last Batch]		= MAX(ES.last_request_start_time),
+		[Login Time]		= MIN(COALESCE(ES.login_time, SP.login_time)),
+		[Wait Type]			= COALESCE(ER.wait_type, N''),
+		[Tran Open?]		= MAX(SP.open_tran),
+		[Tran Log Records]	= SUM(COALESCE(TD.database_transaction_log_record_count, 0)),
+		[Txn Log GB]		= CONVERT(DECIMAL(20,2), (SUM(COALESCE(TD.database_transaction_log_bytes_used, 0)) / 1048576.0) / 1024.0),
+		[Txn Log Rsvd GB]	= CONVERT(DECIMAL(20,2), (SUM(COALESCE(TD.database_transaction_log_bytes_reserved, 0)) / 1048576.0) / 1024.0)
+FROM sys.dm_exec_sessions AS ES		
+	LEFT OUTER JOIN sys.dm_tran_session_transactions AS TS 
+		ON ES.session_id = TS.session_id
+	LEFT OUTER JOIN sys.dm_tran_database_transactions AS TD 
+		ON TD.transaction_id = TS.transaction_id
+	LEFT OUTER JOIN sys.dm_exec_requests AS ER 
+		ON ES.session_id = ER.session_id
+	LEFT OUTER JOIN sys.dm_os_tasks AS T 
+		ON ER.session_id = T.session_id 
+			AND ER.request_id = T.request_id
+	LEFT OUTER JOIN sys.sysprocesses AS SP 
+		ON SP.spid = ES.session_id
+	LEFT OUTER JOIN sys.dm_resource_governor_workload_groups AS G 
+		ON G.group_id = ES.group_id
+	LEFT OUTER JOIN (
+		SELECT	SPID = A.request_session_id, 
+				BlkBy = B.blocking_session_id 
+		FROM sys.dm_tran_locks AS A 
+			JOIN sys.dm_os_waiting_tasks AS B 
+				ON A.lock_owner_address = B.resource_address) AS TL 
+					ON es.Session_ID = tl.SPID 
+	LEFT OUTER JOIN (SELECT	*, row_num = ROW_NUMBER() OVER(PARTITION BY waiting_task_address ORDER BY wait_duration_ms DESC) FROM sys.dm_os_waiting_tasks) AS W 
+		ON t.task_address = w.waiting_task_address 
+			AND w.row_num = 1
+	OUTER APPLY sys.dm_exec_sql_text(SP.[sql_handle]) AS EST
+WHERE ES.Session_ID <> @@SPID
+	AND ES.[host_name] IS NOT NULL
+GROUP BY ES.session_id, EST.[text], W.blocking_session_id, TL.blkby, ES.cpu_time, ER.cpu_time, ER.[status], ES.[status], ER.wait_type, SP.lastwaittype, W.wait_duration_ms, ER.percent_complete, ES.[program_name]
+ORDER BY COALESCE(W.blocking_session_id, TL.BlkBy) DESC, MAX(SP.open_tran) DESC, MAX(CONVERT(SMALLDATETIME, ES.last_request_start_time)) DESC;

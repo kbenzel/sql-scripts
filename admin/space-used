@@ -1,0 +1,229 @@
+
+/* Log File Admin */
+	SELECT	DISTINCT 
+			[database] = D.[name], 
+			[log file] = F.[name],
+			F.physical_name, 
+			[state] = F.state_desc,
+			[MB Avail] = (vs.available_bytes / 1048576),
+			F.size, 
+			F.max_size, 
+			F.growth, 
+			F.is_percent_growth
+	FROM master.sys.master_files AS F
+		INNER JOIN master.sys.databases AS D 
+			ON F.database_id = D.database_id
+		CROSS APPLY master.sys.dm_os_volume_stats(f.database_id, f.[file_id]) AS VS
+	WHERE F.[type_desc] = 'LOG'
+	ORDER BY F.size DESC;
+
+	SELECT DISTINCT + 'USE ' + D.[name] + CHAR(13) + CHAR(10) + 'GO'  + CHAR(13) + CHAR(10) + 'DBCC SHRINKFILE (' + F.[name] + ', 1)' + CHAR(13) + CHAR(10) + CHAR(13) + CHAR(10)
+	FROM master.sys.master_files AS F
+		INNER JOIN master.sys.databases AS D 
+			ON F.database_id = D.database_id
+		CROSS APPLY master.sys.dm_os_volume_stats(f.database_id, f.[file_id]) AS V
+	WHERE F.[type_desc] = 'LOG'
+	ORDER BY 'USE ' + D.[name] + CHAR(13) + CHAR(10) + 'GO' +  + CHAR(13) + CHAR(10) + 'DBCC SHRINKFILE (' + F.[name] + ', 1)' + CHAR(13) + CHAR(10) + CHAR(13) + CHAR(10) ASC;
+
+
+/* Space Used Views */
+	EXEC xp_fixeddrives;
+
+	SELECT * FROM master.dbo.sysaltfiles;
+
+
+/* Databases by Drive */
+	SELECT  DISTINCT
+			[Database] = DB_NAME(database_id), 
+			[Drive] = LEFT(physical_name, 3)
+	FROM master.sys.master_files;
+
+
+/* Space Used By Drive */
+	SELECT	DISTINCT
+			[Drive/Mount]	= S.volume_mount_point,
+			[TotalGB]		= CAST(total_bytes / 1073741824.0E AS DECIMAL(10, 2)),
+			[AvailableGB]	= CAST(available_bytes / 1073741824.0E AS DECIMAL(10, 2)),
+			[% Free]		= CONVERT(VARCHAR(3), FLOOR(((CAST((CAST(available_bytes / 1073741824.0E AS DECIMAL(10, 2))/CAST(total_bytes / 1073741824.0E AS DECIMAL(10, 2))) AS DECIMAL(10, 2)))*100))) + '%'
+	FROM master.sys.master_files AS F
+		CROSS APPLY master.sys.dm_os_volume_stats(f.database_id, f.[file_id]) AS S
+
+
+/* Space Used By Table */
+	;WITH 
+	extra AS
+	(   -- Get info for FullText indexes, XML Indexes, etc
+		SELECT  sit.[object_id],
+				sit.[parent_id],
+				ps.[index_id],
+				SUM(ps.reserved_page_count) AS [reserved_page_count],
+				SUM(ps.used_page_count) AS [used_page_count]
+		FROM master.sys.dm_db_partition_stats AS ps
+			INNER JOIN master.sys.internal_tables AS sit
+				ON sit.[object_id] = ps.[object_id]
+		WHERE sit.internal_type IN (202, 204, 207, 211, 212, 213, 214, 215, 216, 221, 222, 236)
+		GROUP BY sit.[object_id], sit.[parent_id], ps.[index_id]), 
+	
+	agg AS (   -- Get info for Tables, Indexed Views, etc (including "extra")
+		SELECT  ps.[object_id] AS [ObjectID],
+				ps.index_id AS [IndexID],
+				SUM(ps.in_row_data_page_count) AS [InRowDataPageCount],
+				SUM(ps.used_page_count) AS [UsedPageCount],
+				SUM(ps.reserved_page_count) AS [ReservedPageCount],
+				SUM(ps.row_count) AS [RowCount],
+				SUM(ps.lob_used_page_count + ps.row_overflow_used_page_count) AS [LobAndRowOverflowUsedPageCount]
+		FROM master.sys.dm_db_partition_stats ps
+		GROUP BY ps.[object_id], ps.[index_id]
+    
+		UNION ALL
+    
+		SELECT  ex.[parent_id] AS [ObjectID],
+				ex.[object_id] AS [IndexID],
+				0 AS [InRowDataPageCount],
+				SUM(ex.used_page_count) AS [UsedPageCount],
+				SUM(ex.reserved_page_count) AS [ReservedPageCount],
+				0 AS [RowCount],
+				0 AS [LobAndRowOverflowUsedPageCount]
+		FROM extra AS ex
+		GROUP BY ex.[parent_id], ex.[object_id]), 
+	
+	spaceused AS (
+		SELECT  agg.[ObjectID],
+				[SchemaName] = OBJECT_SCHEMA_NAME(agg.[ObjectID]),
+				[TableName] = OBJECT_NAME(agg.[ObjectID]),
+				[Rows] = SUM(CASE WHEN (agg.IndexID < 2) THEN agg.[RowCount] ELSE 0 END),
+				[ReservedKB] = SUM(agg.ReservedPageCount) * 8,
+				[DataKB] = SUM(agg.LobAndRowOverflowUsedPageCount + CASE WHEN (agg.IndexID < 2) THEN (agg.InRowDataPageCount) ELSE 0 END) * 8,
+				[IndexKB] = SUM(agg.UsedPageCount - agg.LobAndRowOverflowUsedPageCount - CASE WHEN (agg.IndexID < 2) THEN agg.InRowDataPageCount ELSE 0 END) * 8,
+				[UnusedKB] = SUM(agg.ReservedPageCount - agg.UsedPageCount) * 8,
+				[UsedKB] = SUM(agg.UsedPageCount) * 8
+		FROM agg
+		GROUP BY agg.[ObjectID], OBJECT_SCHEMA_NAME(agg.[ObjectID]), OBJECT_NAME(agg.[ObjectID]))
+
+	SELECT sp.SchemaName,
+		   sp.TableName,
+		   [Rows] = FORMAT(sp.[Rows], 'N0'),
+		   FORMAT((sp.ReservedKB / 1024.0 / 1024.0), 'N0') AS [ReservedGB],
+		   FORMAT((sp.UsedKB / 1024.0 / 1024.0), 'N0') AS [UsedGB],
+		   FORMAT((sp.UnusedKB / 1024.0 / 1024.0), 'N0') AS [UnusedGB],
+		   FORMAT((sp.DataKB / 1024.0 / 1024.0), 'N0') AS [DataGB],
+		   FORMAT((sp.IndexKB / 1024.0 / 1024.0), 'N0') AS [IndexGB]
+		   --so.[type_desc] AS [ObjectType],
+		   --so.[schema_id] AS [SchemaID],
+		   --sp.ObjectID
+	FROM spaceused AS sp
+		INNER JOIN sys.all_objects AS so
+			ON so.[object_id] = sp.ObjectID
+	WHERE so.is_ms_shipped = 0
+	ORDER BY sp.ReservedKB DESC;
+
+
+/* Generate COUNT(0) statements for all tables */
+	SELECT 'SELECT ' + TABLE_SCHEMA + '.' + TABLE_NAME + ' = ' + ' COUNT(0) FROM ' + TABLE_SCHEMA + '.' + TABLE_NAME
+	FROM INFORMATION_SCHEMA.TABLES
+	ORDER BY TABLE_SCHEMA, TABLE_NAME
+
+
+/* File Sizes in KB */
+	SELECT	[Database] = A.instance_name,
+			[Data File Size (KB)] = D.cntr_value,
+			[Log File Size (KB)] = A.cntr_value,
+			[Log File Space Used (KB)] = B.cntr_value,
+			[Available Log File (KB)] = CAST(A.cntr_value AS NUMERIC)-CAST(B.cntr_value AS NUMERIC),
+			[Percent Log Used] = CONVERT(VARCHAR,C.cntr_value) + '%'		
+	FROM (
+			SELECT instance_name, cntr_value FROM sys.dm_os_performance_counters
+			WHERE counter_name = 'Log File(s) Size (KB)') AS A
+			INNER JOIN (
+				SELECT instance_name, cntr_value FROM sys.dm_os_performance_counters
+				WHERE counter_name = 'Log File(s) Used Size (KB)') AS B ON A.instance_name = B.instance_name
+				LEFT OUTER JOIN (
+					SELECT instance_name, cntr_value FROM sys.dm_os_performance_counters
+					WHERE counter_name = 'Percent Log Used') AS C ON A.instance_name = C.instance_name
+					INNER JOIN (
+						SELECT instance_name, cntr_value FROM sys.dm_os_performance_counters
+						WHERE counter_name = 'Data File(s) Size (KB)') AS D ON A.instance_name = D.instance_name
+	ORDER BY D.cntr_value DESC;
+
+/* Space Used by Database */
+declare @name varchar(255), 
+		@sql varchar(1000); 
+
+create table #ls(
+	name varchar(255), 
+	LogSize real, 
+	LogSpaceUsed real, 
+	Status int);
+
+create table #dbsize1 (
+   fileid int,
+   filegroup int,
+   TotalExtents bigint,
+   UsedExtents bigint,
+   dbname varchar(255),
+   FileName varchar(255));
+
+TRUNCATE TABLE [dev_database].dbo.dbs1;
+
+INSERT INTO #ls
+EXEC ('dbcc sqlperf(logspace)');
+
+INSERT INTO  [dev_database].dbo.dbs1
+SELECT	[Name] = d.name, 
+		[Status] = DATABASEPROPERTYEX(d.name, 'Status'),
+		AutoCreateStatistics = case when DATABASEPROPERTYEX(d.name, 'IsAutoCreateStatistics') = 1 then 'ON' else 'OFF' end, 
+		AutoUpdateStatistics = case when DATABASEPROPERTYEX(d.name, 'IsAutoUpdateStatistics') = 1 then 'ON' else 'OFF' end, 
+		AutoShrink = case when DATABASEPROPERTYEX(d.name, 'IsAutoShrink') = 1 then 'ON' else 'OFF' end, 
+		AutoClose = case when DATABASEPROPERTYEX(d.name, 'IsAutoClose') = 1 then 'ON' else 'OFF' end, 
+		Collation = DATABASEPROPERTYEX(d.name, 'Collation'), 
+		Updateability = DATABASEPROPERTYEX(d.name, 'Updateability'),
+		DATABASEPROPERTYEX(d.name, 'UserAccess') UserAccess, 
+		replace(page_verify_option_desc, '_', ' ') PageVerifyOption, 
+		d.compatibility_level CompatibilityLevel, 
+		RecoveryModel = DATABASEPROPERTYEX(d.name, 'Recovery'),
+		Size = convert(bigint, 0),
+		Used = convert(bigint, 0), 
+		AvgIoMs = case when sum(NumberReads+NumberWrites) > 0 then sum(IoStallMS)/sum(NumberReads+NumberWrites) else -1 end,
+		ls.LogSize, 
+		ls.LogSpaceUsed, 
+		LastBackup = b.backup_start_date
+from master.sys.databases as d 
+	left join msdb..backupset b on d.name = b.database_name and b.backup_start_date = (select max(backup_start_date) from msdb..backupset where database_name = b.database_name and type = 'D') 
+	left join ::fn_virtualfilestats(-1, -1) as vfs on d.database_id = vfs.DbId 
+	join #ls as ls on d.name = ls.name 
+group by d.name, DATABASEPROPERTYEX(d.name, 'Status'), case when DATABASEPROPERTYEX(d.name, 'IsAutoCreateStatistics') = 1 then 'ON' else 'OFF' end, case when DATABASEPROPERTYEX(d.name, 'IsAutoUpdateStatistics') = 1 then 'ON' else 'OFF' end, case when DATABASEPROPERTYEX(d.name, 'IsAutoShrink') = 1 then 'ON' else 'OFF' end, 
+case when DATABASEPROPERTYEX(d.name, 'IsAutoClose') = 1 then 'ON' else 'OFF' end, DATABASEPROPERTYEX(d.name, 'Collation'), DATABASEPROPERTYEX(d.name, 'Updateability'), DATABASEPROPERTYEX(d.name, 'UserAccess'), page_verify_option_desc, d.compatibility_level, DATABASEPROPERTYEX(d.name, 'Recovery'), ls.LogSize, ls.LogSpaceUsed, b.backup_start_date; 
+
+declare c1 cursor for select name from  [dev_database].dbo.dbs1; 
+	open c1;
+		fetch next from c1 into @name; 
+			while @@fetch_status = 0 
+				begin 
+					set @sql = 'use [' + @name + ']; DBCC SHOWFILESTATS WITH NO_INFOMSGS;' 
+					insert into #dbsize1 
+					exec(@sql); 
+   
+					update [dev_database].dbo.dbs1 
+					set Size = (select sum(TotalExtents) / 16 from #dbsize1),
+						Used = (select sum(UsedExtents) / 16 from #dbsize1) 
+					where name = @name; 
+   
+					truncate table #dbsize1; 
+   
+						fetch next from c1 into @name; 
+				end; 
+	close c1;
+deallocate c1; 
+
+SELECT	[Database Name] = [Name],
+		[Data Size (GB)] = Size / 1024.0,
+		[Log Size (GB)] = LogSize / 1024.0,
+		[Total Size (GB)] = SUM(Size + LogSize) / 1024.0,
+		LastBackup
+FROM [dev_database].dbo.dbs1 
+WHERE Updateability <> 'READ_ONLY'
+GROUP BY [Name], Size, LogSize, LastBackup
+ORDER BY Size DESC;
+
+drop table #dbsize1; 
+drop table #ls;
