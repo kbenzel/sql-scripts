@@ -1,0 +1,93 @@
+	CREATE TABLE #Temp(
+		[Date] VARCHAR(10),
+		[File] VARCHAR(50),
+		[Processed] VARCHAR(3),
+		[Rows] VARCHAR(20));
+
+	CREATE TABLE #Error(
+		[time] varchar(50),
+		[message] nvarchar(max));
+
+	DECLARE @emailSubject VARCHAR(255);
+	DECLARE @body NVARCHAR(MAX);
+	DECLARE @xml NVARCHAR(MAX);
+	DECLARE @xml2 NVARCHAR(MAX);
+	
+	INSERT INTO #Temp([Date],[File],[Processed],[Rows])
+	SELECT	[Date]		= COALESCE(CONVERT(CHAR(10),L.dateLogged,101), 'n/a'),
+			    [File]		= A.importType,
+			    [Processed]	= CASE WHEN isFileProcessed = 1 THEN 'Yes' ELSE 'No' END,
+			    [Rows]		= ISNULL(REPLACE(CONVERT(VARCHAR(20), (CAST([rows] AS money)), 1), '.00', ''), '-')
+	FROM (
+			--Import Types
+		) AS A
+		LEFT JOIN [dbo].[ImportLog] AS L 
+      ON L.importType = A.importType
+			  AND L.WeekNumber = DATEPART(WEEK, GETDATE())
+			  AND DATEPART(YEAR, L.dateLogged) = DATEPART(YEAR, GETDATE())
+	ORDER BY A.importType;
+
+	INSERT INTO #Error
+	SELECT MSG.message_time,
+       MSG.[message]
+	FROM SSISDB.catalog.operation_messages AS MSG
+		INNER JOIN SSISDB.catalog.operations AS OPR ON OPR.operation_id = MSG.operation_id
+		INNER JOIN SSISDB.[catalog].[executions] AS E ON OPR.process_id = E.process_id
+	WHERE MSG.message_type = 120
+	AND OPR.[object_name] = 'Path'
+	AND E.package_name IN ('PackageName.dtsx')
+		AND E.execution_id = (SELECT MAX(execution_id) AS execution_id FROM SSISDB.catalog.operations AS OPR 
+		INNER JOIN SSISDB.[catalog].[executions] AS E ON OPR.process_id = E.process_id WHERE package_name = 'PackageName.dtsx')
+	ORDER BY message_time DESC;
+
+	IF NOT EXISTS(SELECT 1 FROM #Error)
+		BEGIN;
+			INSERT INTO #Error
+			SELECT 'None', 'None';
+		END;
+	
+	SET @xml = 
+	CAST((SELECT	[Date] AS 'td', '', 
+					[File] AS 'td', '',
+					[Processed] AS 'td', '',
+					[Rows] AS 'td'	
+	FROM #Temp
+	ORDER BY [File]
+	FOR XML PATH('tr'), ELEMENTS ) AS NVARCHAR(MAX))
+
+	SET @xml2 = 
+	CAST((SELECT	[Time] AS 'td', '', 
+					[Message] AS 'td'	
+	FROM #Error
+	FOR XML PATH('tr'), ELEMENTS ) AS NVARCHAR(MAX))
+
+				SET @body = '
+					<html>
+						<body style="font-family:Verdana,Arial;">
+							<H3><font color="blue" font-family:"Verdana,Arial">[] Import Report</font></H3>
+
+							<table border="1" cellpadding="5" style="border-collapse:collapse; font-family:Verdana,Arial;" > 
+								<tr>
+									<th>Date</th>
+									<th>File</th>
+									<th>Processed</th>
+									<th>Rows</th>
+								</tr>'
+
+				SET @body = @body + @xml +'</table>
+				<table border="1" cellpadding="5" style="border-collapse:collapse; font-family:Verdana,Arial;" > 
+								<tr>
+									<th>Date</th>
+									<th>Message</th>
+								</tr>' + @xml2 + '
+						</body>
+					</html>'
+
+				SET @EmailSubject = CONVERT(VARCHAR(10), CONVERT(DATE, GETDATE())) + ' [] Import Report';
+
+				EXEC msdb.dbo.sp_send_dbmail
+					@body = @body,
+					@body_format = 'HTML',
+					@recipients = ';',
+					@copy_recipients = ';',
+					@subject = @EmailSubject
